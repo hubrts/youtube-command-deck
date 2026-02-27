@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic refresh of YouTube cookies from browser
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec=12h
+Persistent=true
+Unit=ytdl-refresh-cookies.service
+
+[Install]
+WantedBy=timers.target

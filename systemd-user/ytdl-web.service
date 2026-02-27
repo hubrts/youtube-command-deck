@@ -1,0 +1,18 @@
+[Unit]
+Description=YouTube Direct Web UI (User Session)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/illia/youtube_direct_bot
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHON_BIN=/home/illia/youtube_direct_bot/.venv/bin/python
+EnvironmentFile=%h/.config/ytdl-direct-bot.env
+ExecStart=/usr/bin/env bash -lc 'PY="${PYTHON_BIN:-/home/illia/youtube_direct_bot/.venv/bin/python}"; [[ -x "$PY" ]] || PY="$(command -v python3)"; exec "$PY" /home/illia/youtube_direct_bot/web_app.py --host 127.0.0.1 --port 8088'
+Restart=always
+RestartSec=2
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

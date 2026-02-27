@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YouTube Command Deck</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="yt-app">
+      <header class="yt-topbar">
+        <div class="brand">
+          <img class="brand-logo" src="/assets/logo-ui.svg" alt="YouTube Command Deck logo" />
+          <div class="brand-copy">
+            <p class="brand-title">YouTube Command Deck</p>
+            <p class="brand-sub" data-i18n="brand.sub">YouTube operations console</p>
+          </div>
+        </div>
+        <div class="topbar-controls">
+          <span class="topbar-badge">Refactored UI</span>
+          <span class="topbar-hint">YouTube Ops Hub</span>
+          <label class="topbar-lang">
+            <span data-i18n="label.language">Language</span>
+            <select id="langSelect" class="topbar-select">
+              <option value="en">English</option>
+              <option value="uk">Українська</option>
+            </select>
+          </label>
+          <label class="theme-switch" for="themeToggle">
+            <input id="themeToggle" type="checkbox" />
+            <span class="theme-track" aria-hidden="true"></span>
+            <span id="themeToggleLabel" data-i18n="btn.theme_to_night">Night Mode</span>
+          </label>
+          <button id="refreshBtn" class="btn ghost" type="button" data-i18n="btn.refresh">Refresh</button>
+        </div>
+      </header>
+
+      <div class="yt-layout">
+        <aside class="side-nav">
+          <p class="nav-label" data-i18n="nav.modules">Workspaces</p>
+          <nav class="tabs" id="tabsNav">
+            <button class="tab active" data-page="direct" type="button" data-i18n="tab.direct">Direct Download</button>
+            <button class="tab" data-page="archive" type="button" data-i18n="tab.archive">Save Live</button>
+            <button class="tab" data-page="transcript" type="button" data-i18n="tab.transcript">Video Notes</button>
+            <button class="tab" data-page="juice" type="button" data-i18n="tab.juice">Knowledge Brew</button>
+            <button class="tab" data-page="advanced" type="button">Advanced</button>
+          </nav>
+
+          <section class="youtube-notes">
+            <p class="youtube-notes-label">YouTube Notes</p>
+            <ul>
+              <li>Direct tab for quick links and saves.</li>
+              <li>Video Notes tab for transcript Q&A.</li>
+              <li>Knowledge Brew compares winning patterns.</li>
+            </ul>
+          </section>
+        </aside>
+
+        <main class="pages-wrap">
+          <section class="workspace-banner">
+            <p class="workspace-kicker">Command Workspace</p>
+            <h2>Run download, transcript, and research flows from one control plane.</h2>
+            <p>Use the left workspaces to switch tasks. Keep this panel open as your YouTube runbook.</p>
+          </section>
+
+          <section id="page-direct" class="page active">
+            <div class="page-head">
+              <h1 data-i18n="direct.head.title">Video/Audio Download</h1>
+              <p data-i18n="direct.head.desc">Paste a YouTube URL, preview it, then generate download buttons.</p>
+            </div>
+
+            <div class="grid two">
+              <article class="card">
+                <form id="directForm" class="stack">
+                  <input id="directUrlInput" type="url" placeholder="https://www.youtube.com/watch?v=..." data-i18n-placeholder="placeholder.youtube_url" />
+                  <button id="directPrepareBtn" class="btn primary" type="submit" data-i18n="btn.start">Start</button>
+                </form>
+                <p id="directMeta" class="meta"></p>
+                <p id="directRetentionMeta" class="meta"></p>
+                <div id="directPreview" class="direct-preview"></div>
+                <div id="directOutput" class="output"></div>
+              </article>
+
+              <article class="card">
+                <div class="row between">
+                  <h2 data-i18n="direct.saved_videos">Saved Videos</h2>
+                  <input id="vaultSearchInput" type="search" placeholder="Search" data-i18n-placeholder="placeholder.search" />
+                </div>
+                <div id="videoList" class="list dense-list"></div>
+              </article>
+            </div>
+
+            <article class="card">
+              <h2 data-i18n="direct.recent_searches">Recent Searches</h2>
+              <div id="directRecentList" class="list media-feed"></div>
+            </article>
+          </section>
+
+          <section id="page-archive" class="page">
+            <div class="page-head">
+              <h1 data-i18n="archive.head.title">Save Live</h1>
+              <p data-i18n="archive.head.desc">Start/stop live captures and access saved live archives.</p>
+            </div>
+
+            <div class="grid two">
+              <article class="card">
+                <form id="liveStartForm" class="stack">
+                  <input id="liveUrlInput" type="url" placeholder="https://www.youtube.com/watch?v=... or /live/..." data-i18n-placeholder="placeholder.live_url" />
+                  <button id="liveStartBtn" class="btn primary" type="submit" data-i18n="btn.start_saving_live">Start Saving Live</button>
+                </form>
+                <p id="liveStartMeta" class="meta"></p>
+                <p id="liveRetentionMeta" class="meta"></p>
+
+                <div id="activeLiveBlock" hidden>
+                  <h2 data-i18n="archive.currently_saving">Currently Saving Live</h2>
+                  <div id="activeLiveList" class="cards media-feed"></div>
+                </div>
+              </article>
+
+              <article class="card">
+                <div class="row between">
+                  <h2 data-i18n="archive.saved_archive">Saved Live Archive</h2>
+                  <input id="archiveSearchInput" type="search" placeholder="Search" data-i18n-placeholder="placeholder.search" />
+                </div>
+                <div id="savedLiveList" class="cards media-feed"></div>
+              </article>
+            </div>
+          </section>
+
+          <section id="page-transcript" class="page">
+            <div class="page-head">
+              <h1 data-i18n="notes.head.title">Video Notes</h1>
+              <p data-i18n="notes.head.desc">Save transcript, then ask questions and run analysis per selected video.</p>
+            </div>
+
+            <div class="grid transcript-layout">
+              <article class="card transcript-sidebar">
+                <h2 data-i18n="notes.transcript_intake">Transcript Intake</h2>
+                <form id="ingestForm" class="stack">
+                  <input id="urlInput" type="url" placeholder="https://www.youtube.com/watch?v=..." data-i18n-placeholder="placeholder.youtube_url" />
+                  <div class="row between intake-actions">
+                    <label class="check"><input id="forceTranscript" type="checkbox" /> <span data-i18n="notes.rebuild_if_cached">rebuild if cached</span></label>
+                    <button id="ingestBtn" class="btn primary" type="submit" data-i18n="btn.save_transcript">Save Transcript</button>
+                  </div>
+                </form>
+                <p id="ingestMeta" class="meta"></p>
+
+                <h2 data-i18n="notes.newest_transcripts">Newest Transcripts</h2>
+                <input id="notesSearchInput" type="search" placeholder="Search" data-i18n-placeholder="placeholder.search" />
+                <div id="notesVideoList" class="list dense-list"></div>
+              </article>
+
+              <article class="card transcript-main notes-studio">
+                <div class="notes-hero">
+                  <div class="row between notes-head-row">
+                    <div>
+                      <p class="notes-kicker" data-i18n="notes.kicker">Video Notes Studio</p>
+                      <h2 data-i18n="notes.selected_video_notes">Selected Video Notes</h2>
+                    </div>
+                    <a id="videoLink" class="notes-link" target="_blank" rel="noreferrer"></a>
+                  </div>
+                  <img id="videoPreview" class="notes-preview" alt="" loading="lazy" />
+                  <h3 id="videoTitle" class="title notes-title"></h3>
+                  <p id="videoFacts" class="meta notes-facts"></p>
+                </div>
+
+                <div class="notes-action-grid">
+                  <section id="askSection" class="notes-panel notes-panel-ask">
+                    <h4 data-i18n="notes.ask_transcript">Ask Transcript</h4>
+                    <form id="askForm" class="stack notes-form">
+                      <textarea id="questionInput" rows="3" placeholder="Ask about selected video transcript..." data-i18n-placeholder="placeholder.ask_transcript"></textarea>
+                      <button id="askBtn" class="btn primary" type="submit" data-i18n="btn.ask">Ask</button>
+                    </form>
+                    <p id="qaMeta" class="meta"></p>
+                    <pre id="qaOutput" class="output" hidden></pre>
+                  </section>
+
+                  <section id="analyzeSection" class="notes-panel notes-panel-analyze">
+                    <h4 data-i18n="notes.analysis">Analysis</h4>
+                    <div class="row notes-analyze-row">
+                      <button id="analyzeBtn" class="btn primary" type="button" data-i18n="btn.run_analysis">Run Analysis</button>
+                      <label class="check"><input id="forceAnalyze" type="checkbox" /> <span data-i18n="notes.force_fresh">force fresh</span></label>
+                    </div>
+                    <p id="analysisMeta" class="meta"></p>
+                    <pre id="analysisOutput" class="output"></pre>
+                  </section>
+                </div>
+
+                <section class="notes-transcript-panel">
+                  <h4 data-i18n="notes.transcript_preview">Transcript Preview</h4>
+                  <pre id="transcriptOutput" class="output tall"></pre>
+                </section>
+              </article>
+            </div>
+          </section>
+
+          <section id="page-juice" class="page">
+            <div class="page-head">
+              <h1 data-i18n="juice.head.title">Knowledge Brew</h1>
+              <p data-i18n="juice.head.desc">Run caption-aware topic research and follow live progress by step.</p>
+            </div>
+
+            <div class="grid two">
+              <article class="card brew-controls-card">
+                <h2 data-i18n="juice.brew_title">Brew Knowledge Juice</h2>
+                <form id="juiceForm" class="stack juice-compact-form">
+                  <div class="juice-inline-row">
+                    <input id="juiceTopicInput" type="text" placeholder="bakery, mechanic, etc." data-i18n-placeholder="placeholder.topic" />
+                    <button id="juiceFiltersToggle" class="btn ghost" type="button" data-i18n="btn.filters">Filters</button>
+                    <button id="juiceRunBtn" class="btn primary" type="submit" data-i18n="btn.start_brewing">Start Brewing</button>
+                  </div>
+
+                  <div id="juiceFiltersPanel" class="juice-filters-panel" hidden>
+                    <div class="grid two compact">
+                      <label class="field"><span data-i18n="juice.max_videos">Max videos</span><input id="juiceMaxVideos" type="number" min="2" max="40" value="6" /></label>
+                      <label class="field"><span data-i18n="juice.max_queries">Max queries</span><input id="juiceMaxQueries" type="number" min="3" max="30" value="8" /></label>
+                      <label class="field"><span data-i18n="juice.per_query">Per query</span><input id="juicePerQuery" type="number" min="3" max="30" value="8" /></label>
+                      <label class="field"><span data-i18n="juice.min_duration">Min duration (sec)</span><input id="juiceMinDuration" type="number" min="0" value="0" /></label>
+                      <label class="field"><span data-i18n="juice.max_duration">Max duration (sec)</span><input id="juiceMaxDuration" type="number" min="0" value="0" /></label>
+                    </div>
+                    <label class="check"><input id="juiceFast" type="checkbox" checked /> <span data-i18n="juice.fast_mode">make fast (captions only)</span></label>
+                    <label class="check"><input id="juicePrivate" type="checkbox" /> <span data-i18n="juice.private_run">private run (do not save publicly)</span></label>
+                    <p class="meta" data-i18n="juice.captions_note">With captions: no duration cap. Without captions: max 10 minutes.</p>
+                  </div>
+                </form>
+                <p id="juiceMeta" class="meta"></p>
+              </article>
+
+              <article class="card">
+                <div class="row between">
+                  <h2 data-i18n="juice.active_brewings">Active Brewings</h2>
+                  <span id="wsState" class="pill" data-i18n="status.connecting_live_updates">Connecting live updates...</span>
+                </div>
+                <div id="activeBrewList" class="list dense-list"></div>
+
+                <div id="brewDetailPanel" class="brew-detail-panel" hidden>
+                  <div id="brewMeta" class="brew-summary"></div>
+                  <div class="progress-wrap"><div id="brewProgressBar" class="progress-bar"></div></div>
+                  <div id="brewConfigMeta"></div>
+
+                  <div id="currentReviewWrap" hidden>
+                    <h4 class="brew-section-label" data-i18n="juice.currently_under_review">Currently Under Review</h4>
+                    <div id="currentReview" class="cards media-feed"></div>
+                  </div>
+                  <div id="reviewedWrap" hidden>
+                    <h4 class="brew-section-label" data-i18n="juice.reviewed_videos">Reviewed Videos</h4>
+                    <div id="reviewedVideos" class="cards media-feed"></div>
+                  </div>
+                  <div id="candidateWrap" hidden>
+                    <h4 class="brew-section-label" data-i18n="juice.candidate_pool">Candidate Pool</h4>
+                    <div id="candidateVideos" class="cards media-feed"></div>
+                  </div>
+                  <div id="juiceResultWrap" hidden>
+                    <h4 class="brew-section-label" data-i18n="juice.brew_result">Brew Result</h4>
+                    <p id="juiceResultMeta" class="meta"></p>
+                    <pre id="juiceOutput" class="output tall"></pre>
+                  </div>
+                </div>
+              </article>
+            </div>
+
+            <div class="grid two">
+              <article class="card">
+                <div class="row between">
+                  <h2 data-i18n="research.public_researches">Public Researches</h2>
+                  <input id="researchSearchInput" type="search" placeholder="Search" data-i18n-placeholder="placeholder.search" />
+                </div>
+                <div id="researchList" class="list dense-list"></div>
+              </article>
+
+              <article class="card">
+                <h2 id="researchTitle" data-i18n="research.detail">Research Detail</h2>
+                <p id="researchMeta" class="meta"></p>
+                <pre id="researchOutput" class="output tall"></pre>
+              </article>
+            </div>
+          </section>
+
+          <section id="page-advanced" class="page">
+            <div class="page-head">
+              <h1>Advanced Operations</h1>
+              <p>Run component test jobs, watch progress, and inspect stack details for web and TG chatbot.</p>
+            </div>
+
+            <div class="grid two">
+              <article class="card stack-card">
+                <div class="row between">
+                  <h2>Technology Stack</h2>
+                  <button id="stackRefreshBtn" class="btn ghost" type="button">Refresh Stack</button>
+                </div>
+                <p id="stackMeta" class="meta"></p>
+
+                <div class="stack-logo-row">
+                  <div class="stack-logo-box">
+                    <img src="/assets/logo-ui.svg" alt="Web UI logo" />
+                    <p>Web UI</p>
+                  </div>
+                  <div class="stack-logo-box">
+                    <img src="/assets/logo-chatbot.svg" alt="TG chatbot logo" />
+                    <p>TG Chatbot</p>
+                  </div>
+                </div>
+
+                <div class="grid two compact">
+                  <section class="stack-list-wrap">
+                    <h3>Web</h3>
+                    <div id="stackWebList" class="list dense-list"></div>
+                  </section>
+                  <section class="stack-list-wrap">
+                    <h3>TG Chatbot</h3>
+                    <div id="stackTgList" class="list dense-list"></div>
+                  </section>
+                </div>
+              </article>
+
+              <article class="card component-test-card">
+                <div class="row between">
+                  <h2>Component Tests</h2>
+                  <div class="row component-controls">
+                    <select id="componentTypeSelect" class="topbar-select">
+                      <option value="all">All Components</option>
+                      <option value="web">Web UI</option>
+                      <option value="tg">TG Chatbot</option>
+                    </select>
+                    <button id="componentRunBtn" class="btn primary" type="button">Run Tests</button>
+                  </div>
+                </div>
+
+                <p id="componentMeta" class="meta"></p>
+                <div class="progress-wrap"><div id="componentProgressBar" class="progress-bar"></div></div>
+                <div id="componentStats" class="component-stats"></div>
+
+                <h3>Recent Runs</h3>
+                <div id="componentJobsList" class="list dense-list"></div>
+
+                <h3>Test-by-test Progress</h3>
+                <div id="componentCaseList" class="list dense-list"></div>
+
+                <h3>Execution Log</h3>
+                <pre id="componentLog" class="output tall"></pre>
+              </article>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <script type="module" src="/js/main.js"></script>
+  </body>
+</html>

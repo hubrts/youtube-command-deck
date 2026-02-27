@@ -1,0 +1,12 @@
+# Delete videos older than retention window (default 60 days).
+# Install with: crontab /home/illia/youtube_direct_bot/cron/ytdl_cleanup.cron
+15 4 * * * PYTHON_BIN="/home/illia/youtube_direct_bot/.venv/bin/python"; [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3)"; "$PYTHON_BIN" /home/illia/youtube_direct_bot/scripts/prune_old_videos.py >> /home/illia/youtube_direct_bot/data/cleanup_cron.log 2>&1
+
+# Cookie/auth healthcheck every 30 minutes with Telegram alerts on fail/recover.
+# Sources bot env so YT_BOT_TOKEN/BROADCAST_CHAT_IDS are available in cron.
+*/30 * * * * . /home/illia/.config/ytdl-bot.env; PYTHON_BIN="${PYTHON_BIN:-/home/illia/youtube_direct_bot/.venv/bin/python}"; [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3)"; "$PYTHON_BIN" /home/illia/youtube_direct_bot/scripts/cookie_auth_healthcheck.py >> /home/illia/youtube_direct_bot/data/cookie_healthcheck.log 2>&1
+
+# Optional cookie refresh via cron (same strict flow as systemd timer):
+# - reuses existing browser window only (never opens new window)
+# - refuses to overwrite cookies.txt unless required YouTube cookies are present
+# */30 * * * * DISPLAY=:0 YT_COOKIES_FROM_BROWSER='chrome:Default' COOKIE_TOUCH_YOUTUBE_BEFORE_EXPORT=1 COOKIE_REQUIRE_OPEN_YOUTUBE=1 COOKIE_TOUCH_OPEN_NEW_WINDOW_IF_MISSING=0 PYTHON_BIN="/home/illia/youtube_direct_bot/.venv/bin/python"; [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3)"; "$PYTHON_BIN" /home/illia/youtube_direct_bot/scripts/refresh_cookies_from_browser.py >> /home/illia/youtube_direct_bot/data/cookie_refresh.log 2>&1

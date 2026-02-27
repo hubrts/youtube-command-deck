@@ -1,0 +1,25 @@
+[Unit]
+Description=YouTube Telegram Bot (User Session)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/illia/youtube_direct_bot
+Environment=PYTHONUNBUFFERED=1
+Environment=USE_BROWSER_COOKIES=0
+Environment=YT_COOKIES_FROM_BROWSER=chrome
+Environment=COOKIES_FILE=/home/illia/youtube_direct_bot/cookies.txt
+Environment=DATA_DIR=/home/illia/youtube_direct_bot/data
+Environment=STORAGE_DIR=/var/www/wetwilly.tech/youtube-direct-bot-downloads
+Environment=PUBLIC_URL_BASE=https://wetwilly.tech/youtube-direct-bot-downloads
+Environment=PYTHON_BIN=/home/illia/youtube_direct_bot/.venv/bin/python
+EnvironmentFile=%h/.config/ytdl-bot.env
+ExecStartPre=/usr/bin/env bash -lc 'PY="${PYTHON_BIN:-/home/illia/youtube_direct_bot/.venv/bin/python}"; [[ -x "$PY" ]] || PY="$(command -v python3)"; exec "$PY" /home/illia/youtube_direct_bot/scripts/validate_cookies.py --cookies-file="${COOKIES_FILE}"'
+ExecStart=/usr/bin/env bash -lc 'PY="${PYTHON_BIN:-/home/illia/youtube_direct_bot/.venv/bin/python}"; [[ -x "$PY" ]] || PY="$(command -v python3)"; exec "$PY" /home/illia/youtube_direct_bot/bot.py'
+Restart=always
+RestartSec=2
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

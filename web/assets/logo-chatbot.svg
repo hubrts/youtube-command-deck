@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-labelledby="title desc">
+  <title id="title">TG Chatbot Logo</title>
+  <desc id="desc">Speech bubble robot emblem for Telegram chatbot.</desc>
+  <defs>
+    <linearGradient id="bubble" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4dc0ff" />
+      <stop offset="100%" stop-color="#1d86d9" />
+    </linearGradient>
+  </defs>
+  <path d="M36 54c0-16 13-29 29-29h110c16 0 29 13 29 29v82c0 16-13 29-29 29H106l-42 34c-4 3-10 0-10-5v-29c-10-4-18-15-18-28V54z" fill="url(#bubble)" />
+  <rect x="68" y="72" width="104" height="70" rx="20" fill="#e8f7ff" />
+  <circle cx="102" cy="106" r="8" fill="#1f7ebf" />
+  <circle cx="138" cy="106" r="8" fill="#1f7ebf" />
+  <path d="M96 128c8 7 40 7 48 0" stroke="#1f7ebf" stroke-width="7" stroke-linecap="round" fill="none" />
+  <path d="M120 58v18" stroke="#e8f7ff" stroke-width="8" stroke-linecap="round" />
+  <circle cx="120" cy="49" r="8" fill="#e8f7ff" />
+</svg>

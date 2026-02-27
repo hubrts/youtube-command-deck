@@ -1,0 +1,19 @@
+[Unit]
+Description=Refresh YouTube cookies from browser profile
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/illia/youtube_direct_bot
+Environment=YT_COOKIES_FROM_BROWSER=chrome
+Environment=COOKIES_FILE=/home/illia/youtube_direct_bot/cookies.txt
+Environment=COOKIE_REFRESH_TIMEOUT_SEC=90
+Environment=COOKIE_TOUCH_YOUTUBE_BEFORE_EXPORT=1
+Environment=COOKIE_REQUIRE_OPEN_YOUTUBE=1
+Environment=COOKIE_TOUCH_OPEN_NEW_WINDOW_IF_MISSING=0
+Environment=COOKIE_CLOSE_BROWSER_AFTER_EXPORT=0
+Environment=PYTHON_BIN=/home/illia/youtube_direct_bot/.venv/bin/python
+ExecStart=/usr/bin/env bash -lc 'PY="${PYTHON_BIN:-/home/illia/youtube_direct_bot/.venv/bin/python}"; [[ -x "$PY" ]] || PY="$(command -v python3)"; exec "$PY" /home/illia/youtube_direct_bot/scripts/refresh_cookies_from_browser.py'
+ExecStartPost=/usr/bin/env bash -lc 'PY="${PYTHON_BIN:-/home/illia/youtube_direct_bot/.venv/bin/python}"; [[ -x "$PY" ]] || PY="$(command -v python3)"; exec "$PY" /home/illia/youtube_direct_bot/scripts/validate_cookies.py --cookies-file="${COOKIES_FILE}"'
+TimeoutStartSec=120

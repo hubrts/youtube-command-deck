@@ -1573,6 +1573,9 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.chat_data.pop(PENDING_MODE_KEY, None)
 
+    if pending_mode == MODE_SAVE:
+        await _run_save_url_mode(update, context, msg, url)
+        return
     if pending_mode == MODE_DIRECT:
         await _run_direct_url_mode(msg, url)
         return

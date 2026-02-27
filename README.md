@@ -1,4 +1,4 @@
-# YouTube Command Deck
+# YouTube Operation Hub
 
 A self-hosted YouTube operations hub combining a web UI, REST API, and Telegram bot. Built to save time — instead of watching hours of video content, you get structured summaries, transcripts, and answers in seconds.
 

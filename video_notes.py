@@ -96,6 +96,10 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+_YTDLP_TITLE_TIMEOUT_SEC = max(10, _env_int("VIDEO_YTDLP_TITLE_TIMEOUT_SEC", 40))
+_YTDLP_TIMEOUT_SEC = max(30, _env_int("VIDEO_YTDLP_TIMEOUT_SEC", 90))
+
+
 def _claude_wait_for_slot() -> None:
     if not _env_bool("VIDEO_CLAUDE_ENABLE_RATE_LIMIT", "1"):
         return
@@ -307,6 +311,12 @@ def _post_json(url: str, payload: dict, timeout_sec: int = 120) -> dict:
     return obj if isinstance(obj, dict) else {}
 
 
+def _ollama_keep_alive() -> str:
+    # Keep local model loaded between requests to avoid cold starts on VPS.
+    raw = str(os.getenv("VIDEO_LOCAL_LLM_KEEP_ALIVE") or "30m").strip()
+    return raw or "30m"
+
+
 def _ollama_chat(
     *,
     model: str,
@@ -320,6 +330,7 @@ def _ollama_chat(
 ) -> str:
     base = (base_url or os.getenv("VIDEO_LOCAL_LLM_URL") or "http://127.0.0.1:11434").strip()
     api_url = f"{base.rstrip('/')}/api/chat"
+    keep_alive = _ollama_keep_alive()
     if progress_cb is None:
         payload: dict = {
             "model": model,
@@ -329,6 +340,7 @@ def _ollama_chat(
                 {"role": "user", "content": user_prompt},
             ],
             "options": {"temperature": temperature},
+            "keep_alive": keep_alive,
         }
         if format_json:
             payload["format"] = "json"
@@ -351,6 +363,7 @@ def _ollama_chat(
             {"role": "user", "content": user_prompt},
         ],
         "options": {"temperature": temperature},
+        "keep_alive": keep_alive,
     }
     if format_json:
         payload["format"] = "json"
@@ -639,9 +652,19 @@ def _yt_dlp_base_cmd() -> list[str]:
 
 def _download_audio(url: str, workdir: Path) -> Tuple[str, str]:
     title_cmd = [*_yt_dlp_base_cmd(), "--print", "title", url]
-    title_proc = subprocess.run(title_cmd, capture_output=True, text=True)
-    title = (title_proc.stdout or "").strip().splitlines()
-    title = title[-1] if title else "Live"
+    title = "Live"
+    try:
+        title_proc = subprocess.run(
+            title_cmd,
+            capture_output=True,
+            text=True,
+            timeout=_YTDLP_TITLE_TIMEOUT_SEC,
+        )
+        title_lines = (title_proc.stdout or "").strip().splitlines()
+        if title_lines:
+            title = title_lines[-1]
+    except subprocess.TimeoutExpired:
+        title = "Live"
 
     out_template = str(workdir / "audio.%(ext)s")
     client_variants = [
@@ -674,7 +697,15 @@ def _download_audio(url: str, workdir: Path) -> Tuple[str, str]:
                 url,
             ]
 
-            proc = subprocess.run(dl_cmd, capture_output=True, text=True)
+            try:
+                proc = subprocess.run(
+                    dl_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=_YTDLP_TIMEOUT_SEC,
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(f"Audio download timed out after {_YTDLP_TIMEOUT_SEC}s.")
             if proc.returncode != 0:
                 err = (proc.stderr or proc.stdout or "download failed").strip()
                 last_err = err[-1200:]
@@ -831,7 +862,15 @@ def _download_youtube_caption_segments(
         url,
     ]
 
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        p = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_YTDLP_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Caption download timed out after {_YTDLP_TIMEOUT_SEC}s.") from exc
     if p.returncode != 0:
         err = (p.stderr or p.stdout or "caption download failed").strip()
         raise RuntimeError(err[-1200:])
@@ -1382,7 +1421,7 @@ def _embed_texts(texts: List[str], for_query: bool = False) -> Tuple[str, List[L
 
 
 def _plan_query_for_retrieval(question: str, target_lang: str) -> dict:
-    planner_enabled = _env_bool("VIDEO_QA_QUERY_PLANNER", "1")
+    planner_enabled = _env_bool("VIDEO_QA_QUERY_PLANNER", "0")
     if not planner_enabled:
         return {"keywords": [], "focus": "any", "expanded_question": ""}
 
@@ -1563,7 +1602,7 @@ def _rerank_chunk_ids_with_llm(
     candidate_ids: List[int],
     target_lang: str,
 ) -> List[int]:
-    if not candidate_ids or not _env_bool("VIDEO_QA_LLM_RERANK", "1"):
+    if not candidate_ids or not _env_bool("VIDEO_QA_LLM_RERANK", "0"):
         return candidate_ids
 
     backend = (os.getenv("VIDEO_QA_BACKEND") or "local").strip().lower()
@@ -1650,10 +1689,162 @@ def _analyze_transcript_with_ai(title: str, transcript: str) -> str:
     return _analyze_transcript_with_ai_with_progress(title, transcript, None)
 
 
+def _estimate_local_analysis_parts(transcript: str) -> int:
+    text = str(transcript or "")
+    if not text:
+        return 1
+    max_chars = int((os.getenv("VIDEO_AI_MAX_CHARS") or "24000").strip())
+    used = text[:max_chars]
+    trigger_chars = max(4000, int((os.getenv("VIDEO_AI_LOCAL_CHUNK_TRIGGER_CHARS") or "12000").strip()))
+    if len(used) < trigger_chars:
+        return 1
+    chunk_chars = max(2500, int((os.getenv("VIDEO_AI_LOCAL_CHUNK_CHARS") or "7000").strip()))
+    overlap_chars = max(0, int((os.getenv("VIDEO_AI_LOCAL_CHUNK_OVERLAP_CHARS") or "400").strip()))
+    max_chunks = max(1, int((os.getenv("VIDEO_AI_LOCAL_MAX_CHUNKS") or "8").strip()))
+    chunks = _split_text_windows(used, chunk_chars, overlap_chars)[:max_chunks]
+    return max(1, len(chunks))
+
+
+def _split_text_windows(text: str, window_chars: int, overlap_chars: int) -> List[str]:
+    src = str(text or "").strip()
+    if not src:
+        return []
+    win = max(1200, int(window_chars or 0))
+    overlap = max(0, min(int(overlap_chars or 0), win // 3))
+    out: List[str] = []
+    start = 0
+    n = len(src)
+    while start < n:
+        end = min(n, start + win)
+        if end < n:
+            min_cut = start + int(win * 0.55)
+            cut = src.rfind("\n", min_cut, end)
+            if cut < 0:
+                cut = src.rfind(" ", min_cut, end)
+            if cut > start:
+                end = cut
+        chunk = src[start:end].strip()
+        if chunk:
+            out.append(chunk)
+        if end >= n:
+            break
+        start = max(end - overlap, start + 1)
+    return out
+
+
+def _analyze_local_transcript_chunked(
+    *,
+    title: str,
+    transcript: str,
+    truncated: bool,
+    lang_code: str,
+    system_prompt: str,
+    model: str,
+    timeout_sec: int,
+    progress_cb: Optional[Callable[[int, Optional[int], bool], None]],
+    chunk_progress_cb: Optional[Callable[[int, int], None]],
+) -> Tuple[str, int]:
+    trigger_chars = max(4000, int((os.getenv("VIDEO_AI_LOCAL_CHUNK_TRIGGER_CHARS") or "12000").strip()))
+    if len(transcript or "") < trigger_chars:
+        return "", 0
+
+    chunk_chars = max(2500, int((os.getenv("VIDEO_AI_LOCAL_CHUNK_CHARS") or "7000").strip()))
+    overlap_chars = max(0, int((os.getenv("VIDEO_AI_LOCAL_CHUNK_OVERLAP_CHARS") or "400").strip()))
+    max_chunks = max(1, int((os.getenv("VIDEO_AI_LOCAL_MAX_CHUNKS") or "8").strip()))
+    synth_max_chars = max(8000, int((os.getenv("VIDEO_AI_LOCAL_SYNTH_MAX_CHARS") or "22000").strip()))
+
+    chunks = _split_text_windows(transcript, chunk_chars, overlap_chars)[:max_chunks]
+    if len(chunks) <= 1:
+        return "", 0
+    if chunk_progress_cb:
+        chunk_progress_cb(0, len(chunks))
+
+    notes: List[str] = []
+    generated_chars = 0
+    for idx, chunk in enumerate(chunks, start=1):
+        if lang_code == "en":
+            part_user_prompt = (
+                f"Title: {title}\n"
+                f"Transcript part {idx}/{len(chunks)} {'(source transcript was truncated)' if truncated else ''}:\n\n"
+                f"{chunk}\n\n"
+                "Task: summarize ONLY this part with concrete facts, practical actions, and uncertainties."
+            )
+        else:
+            part_user_prompt = (
+                f"Назва: {title}\n"
+                f"Частина транскрипту {idx}/{len(chunks)} {'(вхідний транскрипт був обрізаний)' if truncated else ''}:\n\n"
+                f"{chunk}\n\n"
+                "Завдання: підсумуй ТІЛЬКИ цю частину з фактами, практичними діями та невизначеностями."
+            )
+        try:
+            part_text = _chat_with_provider(
+                provider="local",
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=part_user_prompt,
+                temperature=0.2,
+                timeout_sec=timeout_sec,
+                progress_cb=None,
+            )
+        except Exception:
+            part_text = ""
+        part_text = str(part_text or "").strip()
+        if not part_text:
+            continue
+        notes.append(part_text)
+        generated_chars += len(part_text)
+        if progress_cb:
+            progress_cb(generated_chars, max(1, generated_chars // 4), False)
+        if chunk_progress_cb:
+            chunk_progress_cb(idx, len(chunks))
+
+    if not notes:
+        return "", len(chunks)
+    if len(notes) == 1:
+        return notes[0], len(chunks)
+
+    joined = "\n\n".join(f"PART {i + 1}/{len(notes)}:\n{txt}" for i, txt in enumerate(notes))
+    joined = joined[:synth_max_chars]
+    if lang_code == "en":
+        synth_user_prompt = (
+            f"Title: {title}\n"
+            "Below are analyses from multiple transcript parts. Merge them into one final coherent analysis.\n\n"
+            f"{joined}"
+        )
+    else:
+        synth_user_prompt = (
+            f"Назва: {title}\n"
+            "Нижче аналізи з кількох частин транскрипту. Об'єднай їх у фінальний узгоджений аналіз.\n\n"
+            f"{joined}"
+        )
+    try:
+        final_text = _chat_with_provider(
+            provider="local",
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=synth_user_prompt,
+            temperature=0.2,
+            timeout_sec=timeout_sec,
+            progress_cb=None,
+        )
+    except Exception:
+        final_text = ""
+    final_text = str(final_text or "").strip()
+    if final_text:
+        if progress_cb:
+            done_chars = generated_chars + len(final_text)
+            progress_cb(done_chars, max(1, done_chars // 4), False)
+        return final_text, len(chunks)
+
+    fallback_text = "\n\n".join(f"Part {i + 1}/{len(notes)}\n{txt}" for i, txt in enumerate(notes))
+    return fallback_text.strip(), len(chunks)
+
+
 def _analyze_transcript_with_ai_with_progress(
     title: str,
     transcript: str,
     progress_cb: Optional[Callable[[int, Optional[int], bool], None]],
+    chunk_progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> str:
     enabled = _env_bool("VIDEO_USE_AI_ANALYZER", "1")
     if not enabled:
@@ -1696,6 +1887,7 @@ def _analyze_transcript_with_ai_with_progress(
         txt = ""
         used_provider = ""
         used_model = ""
+        used_chunk_parts = 0
         attempts: List[Tuple[str, str]] = []
         if backend in ("local", "ollama"):
             attempts = [("local", local_model)]
@@ -1709,6 +1901,25 @@ def _analyze_transcript_with_ai_with_progress(
             attempts = [("local", local_model)]
         for provider, model in attempts:
             try:
+                chunk_parts = 0
+                if provider == "local":
+                    chunked_text, chunk_parts = _analyze_local_transcript_chunked(
+                        title=title,
+                        transcript=used,
+                        truncated=truncated,
+                        lang_code=lang_code,
+                        system_prompt=system_prompt,
+                        model=model,
+                        timeout_sec=timeout_sec,
+                        progress_cb=progress_cb,
+                        chunk_progress_cb=chunk_progress_cb,
+                    )
+                    if chunked_text.strip():
+                        txt = chunked_text
+                        used_provider = provider
+                        used_model = model
+                        used_chunk_parts = chunk_parts
+                        break
                 txt = _chat_with_provider(
                     provider=provider,
                     model=model,
@@ -1721,6 +1932,7 @@ def _analyze_transcript_with_ai_with_progress(
                 if (txt or "").strip():
                     used_provider = provider
                     used_model = model
+                    used_chunk_parts = chunk_parts
                     break
             except Exception:
                 continue
@@ -1735,6 +1947,8 @@ def _analyze_transcript_with_ai_with_progress(
         else:
             prefix += f"☁️ Backend: OpenAI ({openai_model})\n"
         prefix += f"🗣 Output language: {lang_label}\n"
+        if used_provider == "local" and used_chunk_parts > 1:
+            prefix += f"ℹ️ Local chunked analysis: {used_chunk_parts} parts.\n"
         if truncated:
             prefix += "ℹ️ Analysis used a truncated transcript window due to size limits.\n"
         return with_tg_time(prefix + txt)
@@ -2111,7 +2325,7 @@ def answer_question_from_transcript(
     allow_local_fallback = _env_bool("VIDEO_QA_ALLOW_LOCAL_FALLBACK", "1")
     max_chars = int((os.getenv("VIDEO_QA_MAX_CHARS") or "24000").strip())
     timeout_sec = int((os.getenv("VIDEO_QA_TIMEOUT_SEC") or "180").strip())
-    qa_retries = max(1, int((os.getenv("VIDEO_QA_RETRIES") or "2").strip()))
+    qa_retries = max(1, int((os.getenv("VIDEO_QA_RETRIES") or "1").strip()))
     stem = re.sub(r"[^A-Za-z0-9_-]+", "", Path(transcript_path).stem)
     resolved_video_id = stem if re.fullmatch(r"[A-Za-z0-9_-]{6,20}", stem or "") else ""
     context_txt, truncated, evidence_hints, planner = _build_qa_context_from_transcript(

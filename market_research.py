@@ -40,6 +40,35 @@ from ytbot_state import (
 from ytbot_utils import extract_youtube_id, with_tg_time
 
 NO_CAPTION_MAX_DURATION_SEC = 10 * 60
+_TOPIC_STOPWORDS = {
+    "i",
+    "want",
+    "to",
+    "become",
+    "successful",
+    "in",
+    "open",
+    "start",
+    "build",
+    "launch",
+    "run",
+    "create",
+    "how",
+    "business",
+    "owner",
+    "owners",
+    "story",
+    "stories",
+    "case",
+    "study",
+    "interview",
+    "interviews",
+    "mistakes",
+    "lessons",
+    "from",
+    "zero",
+    "profitable",
+}
 
 
 def _parse_int_env(name: str, default: int) -> int:
@@ -59,6 +88,97 @@ def build_knowledge_juice_goal(topic_text: str) -> str:
         "Find popular YouTube videos where real owners/operators explain how they started and grew. "
         "Save transcripts, compare similarities and differences, and give practical next steps."
     )
+
+
+def _extract_focus_topic(text: str) -> str:
+    raw = re.sub(r"\s+", " ", str(text or "").strip())
+    if not raw:
+        return ""
+
+    patterns = (
+        r"i want to become successful in\s+(.+?)(?:[\.\n]|$)",
+        r"i want to\s+(?:open|start|build|launch|run|create)\s+(.+?)(?:[\.\n]|$)",
+        r"(?:how to|ways to)\s+(?:open|start|build|launch|run|create)\s+(.+?)(?:[\.\n]|$)",
+    )
+    focus = raw
+    for pat in patterns:
+        m = re.search(pat, raw, flags=re.IGNORECASE)
+        if m:
+            focus = re.sub(r"\s+", " ", m.group(1)).strip()
+            break
+
+    focus = re.sub(r"^(?:i\s+want\s+to\s+become\s+successful\s+in)\s+", "", focus, flags=re.IGNORECASE).strip()
+    focus = re.sub(r"^(?:i\s+want\s+to)\s+", "", focus, flags=re.IGNORECASE).strip()
+    focus = re.sub(r"^(?:how\s+to)\s+", "", focus, flags=re.IGNORECASE).strip()
+    return focus.strip(" ,.;:!?")
+
+
+def _normalize_topic_token(token: str) -> str:
+    tok = str(token or "").strip().lower()
+    if len(tok) > 4 and tok.endswith("ies"):
+        return tok[:-3] + "y"
+    if len(tok) > 3 and tok.endswith("s"):
+        return tok[:-1]
+    return tok
+
+
+def _focus_tokens(focus: str) -> List[str]:
+    raw_tokens = [x for x in re.findall(r"[a-z0-9]+", str(focus or "").lower()) if len(x) >= 3]
+    out: List[str] = []
+    seen = set()
+    for token in raw_tokens:
+        if token in _TOPIC_STOPWORDS:
+            continue
+        norm = _normalize_topic_token(token)
+        if not norm or norm in _TOPIC_STOPWORDS or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
+
+
+def _query_mentions_focus(query: str, focus: str) -> bool:
+    q = str(query or "").lower()
+    f = str(focus or "").lower()
+    if not q or not f:
+        return False
+    if f in q:
+        return True
+    f_tokens = _focus_tokens(f)
+    if not f_tokens:
+        return False
+    q_tokens = {_normalize_topic_token(x) for x in re.findall(r"[a-z0-9]+", q)}
+    matched = sum(1 for tok in f_tokens if tok in q_tokens)
+    min_required = 1 if len(f_tokens) <= 1 else 2
+    return matched >= min_required
+
+
+def _is_candidate_on_topic(item: dict, focus_topic: str) -> bool:
+    focus = str(focus_topic or "").strip().lower()
+    if not focus:
+        return True
+
+    tokens = _focus_tokens(focus)
+    if not tokens:
+        return True
+
+    title = str(item.get("title") or "")
+    channel = str(item.get("channel") or "")
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    description = str(meta.get("description") or "")
+    tags = meta.get("tags") if isinstance(meta.get("tags"), list) else []
+    tags_text = " ".join(str(x or "") for x in tags[:20])
+    hay = " ".join((title, channel, description, tags_text)).lower()
+    hay = re.sub(r"\s+", " ", hay).strip()
+    if not hay:
+        return False
+    if focus in hay:
+        return True
+
+    hay_tokens = {_normalize_topic_token(x) for x in re.findall(r"[a-z0-9]+", hay)}
+    matched = sum(1 for tok in tokens if tok in hay_tokens)
+    min_required = 1 if len(tokens) <= 1 else 2
+    return matched >= min_required
 
 
 def _llm_json_with_backend(system_prompt: str, user_prompt: str, *, timeout_sec: int = 120) -> Tuple[dict, str]:
@@ -152,12 +272,16 @@ def _generate_queries(
     max_queries: int,
     llm_backend_cb: Optional[Callable[[str], None]] = None,
 ) -> List[str]:
+    focus_topic = _extract_focus_topic(goal_text)
     system_prompt = (
         "Generate high-quality YouTube search queries for finding owner success stories and practical business lessons. "
-        "Return JSON with key queries (list of strings). Keep queries diverse and concise."
+        "Return JSON with key queries (list of strings). Keep queries diverse and concise. "
+        "Hard constraints: each query must stay explicitly about the user's focus topic phrase. "
+        "Do not switch to adjacent tech/product terms unless they are explicitly part of the focus topic."
     )
     user_prompt = (
         f"Goal: {goal_text}\n"
+        f"Focus topic phrase (must appear in every query): {focus_topic}\n"
         f"Intent: {json.dumps(intent, ensure_ascii=False)}\n"
         f"Max queries: {max_queries}"
     )
@@ -186,6 +310,9 @@ def _generate_queries(
     out: List[str] = []
     seen = set()
     for q in queries:
+        q = re.sub(r"\s+", " ", str(q or "").strip())
+        if focus_topic and not _query_mentions_focus(q, focus_topic):
+            q = f"{focus_topic} {q}".strip()
         key = q.lower()
         if key in seen:
             continue
@@ -333,17 +460,20 @@ def _collect_candidate_videos_with_stats(
     per_query: int,
     max_total: int,
     *,
+    focus_topic: str = "",
     min_duration_sec: int = 0,
     max_duration_sec: int = 0,
     captions_only: bool = False,
+    on_query_progress: Optional[Callable[[dict], None]] = None,
 ) -> Tuple[List[dict], dict]:
     merged: Dict[str, dict] = {}
     caption_cache: Dict[str, bool] = {}
+    active_queries = [str(q or "").strip() for q in queries if str(q or "").strip()]
     effective_no_caption_max_sec = NO_CAPTION_MAX_DURATION_SEC
     if max_duration_sec > 0:
         effective_no_caption_max_sec = min(effective_no_caption_max_sec, int(max_duration_sec))
     stats = {
-        "query_count": len([q for q in queries if str(q or "").strip()]),
+        "query_count": len(active_queries),
         "seen_total": 0,
         "eligible_total": 0,
         "with_captions": 0,
@@ -352,12 +482,26 @@ def _collect_candidate_videos_with_stats(
         "filtered_too_short": 0,
         "filtered_no_caption_too_long": 0,
         "filtered_without_captions": 0,
+        "filtered_off_topic": 0,
         "captions_only": bool(captions_only),
         "no_caption_max_duration_sec": int(effective_no_caption_max_sec),
+        "focus_topic": str(focus_topic or "").strip(),
         "query_stats": [],
     }
-    for q in queries:
-        query_text = str(q or "").strip()
+    for q_idx, query_text in enumerate(active_queries, start=1):
+        if on_query_progress:
+            try:
+                on_query_progress(
+                    {
+                        "phase": "query_started",
+                        "query_index": q_idx,
+                        "total_queries": len(active_queries),
+                        "query": query_text,
+                        "search_stats": dict(stats),
+                    }
+                )
+            except Exception:
+                pass
         query_rows = _search_youtube_videos(query_text, per_query)
         q_stats = {
             "query": query_text,
@@ -370,9 +514,14 @@ def _collect_candidate_videos_with_stats(
             "filtered_too_short": 0,
             "filtered_no_caption_too_long": 0,
             "filtered_without_captions": 0,
+            "filtered_off_topic": 0,
         }
         for item in query_rows:
             stats["seen_total"] += 1
+            if not _is_candidate_on_topic(item, focus_topic):
+                stats["filtered_off_topic"] += 1
+                q_stats["filtered_off_topic"] += 1
+                continue
             dur = int(item.get("duration_sec") or 0)
             too_short_if_no_captions = min_duration_sec > 0 and dur > 0 and dur < min_duration_sec
             too_long_if_no_captions = effective_no_caption_max_sec > 0 and dur > 0 and dur > effective_no_caption_max_sec
@@ -416,6 +565,20 @@ def _collect_candidate_videos_with_stats(
             if vid not in merged or float(item["popularity_score"]) > float(merged[vid].get("popularity_score") or 0.0):
                 merged[vid] = item
         stats["query_stats"].append(q_stats)
+        if on_query_progress:
+            try:
+                on_query_progress(
+                    {
+                        "phase": "query_processed",
+                        "query_index": q_idx,
+                        "total_queries": len(active_queries),
+                        "query": query_text,
+                        "query_stats": dict(q_stats),
+                        "search_stats": dict(stats),
+                    }
+                )
+            except Exception:
+                pass
 
     ranked = sorted(merged.values(), key=lambda x: float(x.get("popularity_score") or 0.0), reverse=True)
     out: List[dict] = []
@@ -431,6 +594,7 @@ def _collect_candidate_videos(
     per_query: int,
     max_total: int,
     *,
+    focus_topic: str = "",
     min_duration_sec: int = 0,
     max_duration_sec: int = 0,
     captions_only: bool = False,
@@ -439,6 +603,7 @@ def _collect_candidate_videos(
         queries,
         per_query,
         max_total,
+        focus_topic=focus_topic,
         min_duration_sec=min_duration_sec,
         max_duration_sec=max_duration_sec,
         captions_only=captions_only,
@@ -665,6 +830,91 @@ def _extract_research_topics(
     return fallback[:8]
 
 
+def _clean_short_title(text: str, *, max_len: int = 82) -> str:
+    title = re.sub(r"\s+", " ", str(text or "").strip())
+    title = title.strip(" \t\r\n\"'`.,;:!?-")
+    if not title:
+        return ""
+    if len(title) <= max_len:
+        return title
+    clipped = title[:max_len].rstrip()
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0].rstrip()
+    return clipped or title[:max_len].rstrip()
+
+
+def _fallback_public_research_title(goal_text: str, topics: List[dict]) -> str:
+    focus = _extract_focus_topic(goal_text)
+    if not focus:
+        focus = re.sub(r"\s+", " ", str(goal_text or "").strip())
+    focus = re.sub(
+        r"^(?:i\s+want\s+to\s+)?(?:become\s+successful\s+in|open|start|build|launch|run|create)\s+",
+        "",
+        focus,
+        flags=re.IGNORECASE,
+    ).strip(" \t\r\n.,;:!?")
+    if not focus and topics:
+        first_tag = str((topics[0] or {}).get("tag") or "").strip()
+        focus = first_tag
+    if not focus:
+        return "Business Success Breakdown"
+    focus_title = _clean_short_title(focus.title())
+    if not focus_title:
+        return "Business Success Breakdown"
+    if re.search(r"\b(story|stories|case|cases|strategy|strategies|playbook|guide)\b", focus_title, re.IGNORECASE):
+        return focus_title
+    return _clean_short_title(f"{focus_title} Success Story") or "Business Success Breakdown"
+
+
+def _build_public_research_title(
+    *,
+    goal_text: str,
+    comparison_summary: dict,
+    topics: List[dict],
+    videos: List[dict],
+    report_text: str,
+    llm_backend_cb: Optional[Callable[[str], None]] = None,
+) -> str:
+    summary = comparison_summary if isinstance(comparison_summary, dict) else {}
+    topic_tags = [
+        re.sub(r"\s+", " ", str((row or {}).get("tag") or "").strip())
+        for row in (topics or [])
+        if isinstance(row, dict)
+    ]
+    topic_tags = [x for x in topic_tags if x]
+    payload = {
+        "goal_text": str(goal_text or "").strip(),
+        "topic_tags": topic_tags[:8],
+        "video_count": len(videos or []),
+        "top_video_titles": [
+            re.sub(r"\s+", " ", str((v or {}).get("title") or "").strip())
+            for v in (videos or [])[:5]
+            if isinstance(v, dict)
+        ],
+        "similarities": summary.get("similarities") if isinstance(summary.get("similarities"), list) else [],
+        "differences": summary.get("differences") if isinstance(summary.get("differences"), list) else [],
+        "recommendations": summary.get("recommendations") if isinstance(summary.get("recommendations"), list) else [],
+        "report_excerpt": str(report_text or "")[:1600],
+    }
+    system_prompt = (
+        "You write short public titles for business video-comparison research. "
+        "Return strict JSON only: {\"title\":\"...\"}. "
+        "Rules: 3-7 words, no quotes, no emojis, no trailing period, clear business idea."
+    )
+    user_prompt = f"Data:\n{json.dumps(payload, ensure_ascii=False)}"
+    generated = ""
+    try:
+        data, provider = _llm_json_with_backend(system_prompt, user_prompt, timeout_sec=70)
+        if llm_backend_cb:
+            llm_backend_cb(provider)
+        generated = _clean_short_title(str(data.get("title") or data.get("research_title") or ""))
+    except Exception:
+        generated = ""
+    if generated:
+        return generated
+    return _fallback_public_research_title(goal_text, topics)
+
+
 async def _send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
     max_len = 3900
     if len(text) <= max_len:
@@ -703,6 +953,9 @@ def _search_summary_text(video_stats: dict, *, max_queries: int = 4) -> str:
     seen_total = int(stats.get("seen_total") or 0)
     eligible_total = int(stats.get("eligible_total") or 0)
     summary = f"Searched {total_queries} queries and got {seen_total} results; {eligible_total} passed filters."
+    filtered_off_topic = int(stats.get("filtered_off_topic") or 0)
+    if filtered_off_topic > 0:
+        summary += f" Topic filter removed {filtered_off_topic} off-topic items."
     if bool(stats.get("captions_only")):
         removed_no_captions = int(stats.get("filtered_without_captions") or 0)
         summary += f" Fast mode removed {removed_no_captions} items without captions."
@@ -748,6 +1001,7 @@ async def run_market_research(
     min_duration_sec = max(0, int(min_duration_sec or 0))
     max_duration_sec = max(0, int(max_duration_sec or 0))
     captions_only = bool(captions_only)
+    focus_topic = _extract_focus_topic(goal)
     no_caption_max_duration_sec = NO_CAPTION_MAX_DURATION_SEC
     if max_duration_sec > 0:
         no_caption_max_duration_sec = min(no_caption_max_duration_sec, max_duration_sec)
@@ -797,6 +1051,7 @@ async def run_market_research(
                 "max_duration_sec": max_duration_sec,
                 "no_caption_max_duration_sec": int(no_caption_max_duration_sec),
                 "captions_only": captions_only,
+                "focus_topic": focus_topic,
             },
             detail="Understanding your goal and preparing settings.",
             progress={"step": 1, "total_steps": 5, "ratio": 0.05},
@@ -827,14 +1082,53 @@ async def run_market_research(
             text=with_tg_time(f"{status_title}\nStep 3/5: Finding relevant YouTube videos"),
             disable_web_page_preview=True,
         )
+        progress_loop = asyncio.get_running_loop()
+
+        def _emit_search_progress_from_thread(payload: dict) -> None:
+            data = payload if isinstance(payload, dict) else {}
+            phase = str(data.get("phase") or "").strip().lower()
+            idx = int(data.get("query_index") or 0)
+            total = max(1, int(data.get("total_queries") or 0))
+            qtxt = str(data.get("query") or "")
+            event_type = "search_query_started" if phase == "query_started" else "search_query_processed"
+            ratio = 0.2 + (
+                0.15
+                * (
+                    max(0, idx - (1 if phase == "query_started" else 0))
+                    / total
+                )
+            )
+            detail = f"Searching query {idx}/{total}: {qtxt}"
+            fut = asyncio.run_coroutine_threadsafe(
+                _emit_progress(
+                    event_type,
+                    query_index=idx,
+                    total_queries=total,
+                    query=qtxt,
+                    search_stats=data.get("search_stats") if isinstance(data.get("search_stats"), dict) else {},
+                    query_stats=(
+                        list(((data.get("search_stats") or {}).get("query_stats") or []))
+                        if isinstance(data.get("search_stats"), dict)
+                        else []
+                    ),
+                    detail=detail,
+                    progress={"step": 3, "total_steps": 5, "ratio": ratio},
+                ),
+                progress_loop,
+            )
+            # Best-effort UI progress signal; failures are handled in _emit_progress.
+            del fut
+
         videos, video_stats = await asyncio.to_thread(
             _collect_candidate_videos_with_stats,
             queries,
             per_query,
             max_videos,
+            focus_topic=focus_topic,
             min_duration_sec=min_duration_sec,
             max_duration_sec=max_duration_sec,
             captions_only=captions_only,
+            on_query_progress=_emit_search_progress_from_thread,
         )
         last_video_stats = video_stats if isinstance(video_stats, dict) else {}
         if not videos:
@@ -843,6 +1137,7 @@ async def run_market_research(
             eligible_total = int(video_stats.get("eligible_total") or 0)
             filtered_no_caption_too_long = int(video_stats.get("filtered_no_caption_too_long") or 0)
             filtered_too_short = int(video_stats.get("filtered_too_short") or 0)
+            filtered_off_topic = int(video_stats.get("filtered_off_topic") or 0)
             with_captions = int(video_stats.get("with_captions") or 0)
             filtered_without_captions = int(video_stats.get("filtered_without_captions") or 0)
             no_caption_limit = int(video_stats.get("no_caption_max_duration_sec") or NO_CAPTION_MAX_DURATION_SEC)
@@ -865,6 +1160,8 @@ async def run_market_research(
                 and filtered_too_short > 0
             ):
                 err_text = "I've found those videos but they're shorter than your minimum duration setting."
+            elif seen_total > 0 and eligible_total == 0 and filtered_off_topic > 0:
+                err_text = "I've found videos, but they were off-topic for your requested focus."
             elif seen_total == 0:
                 err_text = "Search returned no videos for the generated queries."
 
@@ -1040,6 +1337,15 @@ async def run_market_research(
             saved_facts,
             _mark_llm_backend,
         )
+        display_title = await asyncio.to_thread(
+            _build_public_research_title,
+            goal_text=goal,
+            comparison_summary=summary,
+            topics=topics,
+            videos=saved_videos,
+            report_text=report,
+            llm_backend_cb=_mark_llm_backend,
+        )
         if related:
             report += "\n\n🔎 Related Areas You May Explore\n"
             for item in related[:8]:
@@ -1061,6 +1367,7 @@ async def run_market_research(
                     "related_areas": related,
                     "comparison": summary,
                     "video_count": len(saved_videos),
+                    "display_title": display_title,
                 },
             )
         if on_report:
@@ -1076,6 +1383,7 @@ async def run_market_research(
             is_public=bool(run_id),
             report_text=report,
             summary=summary,
+            display_title=display_title,
             detail=f"Completed with {len(saved_videos)} analyzed videos.",
             progress={"step": 5, "total_steps": 5, "ratio": 1.0},
         )

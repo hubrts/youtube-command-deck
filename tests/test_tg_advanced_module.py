@@ -22,6 +22,12 @@ class TgAdvancedModuleTests(unittest.TestCase):
         self.assertTrue(isinstance(tg_items, list) and len(tg_items) > 0)
         names = {str(item.get("name") or "") for item in tg_items}
         self.assertIn("python-telegram-bot", names)
+        self.assertIn("Local LLM (Ollama)", names)
+        self.assertIn("Remote LLM (OpenAI)", names)
+        self.assertIn("Remote LLM (Anthropic Claude)", names)
+        self.assertIn("Transcript Maker (YouTube captions)", names)
+        self.assertIn("Transcript Maker (audio STT)", names)
+        self.assertIn("Transcript Analyzer", names)
 
 
 if __name__ == "__main__":

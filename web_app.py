@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import mimetypes
 import os
@@ -45,7 +46,7 @@ from video_notes import (
     _transcribe_segments,
     answer_question_from_transcript,
 )
-from ytbot_config import DATA_DIR, RETENTION_DAYS
+from ytbot_config import DATA_DIR, RETENTION_DAYS, STORAGE_DIR
 from ytbot_state import (
     STATE,
     get_public_research_run,
@@ -64,12 +65,21 @@ try:
 except Exception:
     websockets = None
 
+try:
+    from video_notes import _estimate_local_analysis_parts as _estimate_local_analysis_parts
+except Exception:
+    def _estimate_local_analysis_parts(transcript: str) -> int:
+        _ = str(transcript or "")
+        return 1
+
 WEB_DIR = Path(__file__).resolve().parent / "web"
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 CAPTIONS_DIR = DATA_DIR / "captions"
+NOTES_EXPORTS_DIR = DATA_DIR / "notes_exports"
 YT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,20}$")
 DEFAULT_BREW_WS_PORT = int((os.getenv("WEB_BREW_WS_PORT") or "8766").strip() or 8766)
 DEFAULT_NO_CAPTION_MAX_DURATION_SEC = 10 * 60
+QA_CACHE_LIMIT = 40
 
 _RUNTIME: dict = {
     "ws_enabled": False,
@@ -86,6 +96,16 @@ _COMPONENT_TEST_LOG_LIMIT = 220
 _COMPONENT_TEST_JOB_LIMIT = 24
 _COMPONENT_TEST_CASE_LIMIT = 400
 COMPONENT_TESTS_DIR = Path(__file__).resolve().parent / "tests"
+_ANALYZE_PROGRESS_LOCK = threading.Lock()
+_ANALYZE_PROGRESS: dict[str, dict] = {}
+_ASK_PROGRESS_LOCK = threading.Lock()
+_ASK_PROGRESS: dict[str, dict] = {}
+_NOTES_TASK_LOCK = threading.Lock()
+_NOTES_TASK_ACTIVE: set[str] = set()
+_PUBLIC_FILE_INDEX_LOCK = threading.Lock()
+_PUBLIC_FILE_INDEX = {"built_at": 0.0, "by_video": {}}
+_DIRECT_SAVE_LOCK = threading.Lock()
+_DIRECT_SAVE_ACTIVE: dict[str, dict] = {}
 
 
 def _json_dumps(payload: dict) -> bytes:
@@ -100,6 +120,173 @@ def _clip_list(items, limit: int = 30):
     if not isinstance(items, list):
         return []
     return items[: max(1, int(limit))]
+
+
+def _set_analyze_progress(video_id: str, **changes) -> dict:
+    vid = str(video_id or "").strip()
+    if not vid:
+        return {}
+    with _ANALYZE_PROGRESS_LOCK:
+        prev = _ANALYZE_PROGRESS.get(vid) or {}
+        merged = {**prev, **changes}
+        merged["video_id"] = vid
+        merged["updated_at"] = _utc_now_iso()
+        _ANALYZE_PROGRESS[vid] = merged
+        return dict(merged)
+
+
+def _get_analyze_progress(video_id: str) -> dict:
+    vid = str(video_id or "").strip()
+    if not vid:
+        return {}
+    with _ANALYZE_PROGRESS_LOCK:
+        row = _ANALYZE_PROGRESS.get(vid)
+        return dict(row) if isinstance(row, dict) else {}
+
+
+def _set_ask_progress(video_id: str, **changes) -> dict:
+    vid = str(video_id or "").strip()
+    if not vid:
+        return {}
+    with _ASK_PROGRESS_LOCK:
+        prev = _ASK_PROGRESS.get(vid) or {}
+        merged = {**prev, **changes}
+        merged["video_id"] = vid
+        merged["updated_at"] = _utc_now_iso()
+        _ASK_PROGRESS[vid] = merged
+        return dict(merged)
+
+
+def _get_ask_progress(video_id: str) -> dict:
+    vid = str(video_id or "").strip()
+    if not vid:
+        return {}
+    with _ASK_PROGRESS_LOCK:
+        row = _ASK_PROGRESS.get(vid)
+        return dict(row) if isinstance(row, dict) else {}
+
+
+def _notes_task_key(video_id: str, task: str) -> str:
+    vid = str(video_id or "").strip()
+    kind = str(task or "").strip().lower()
+    return f"{kind}:{vid}" if vid and kind else ""
+
+
+def _try_start_notes_task(video_id: str, task: str) -> bool:
+    key = _notes_task_key(video_id, task)
+    if not key:
+        return False
+    with _NOTES_TASK_LOCK:
+        if key in _NOTES_TASK_ACTIVE:
+            return False
+        _NOTES_TASK_ACTIVE.add(key)
+    return True
+
+
+def _finish_notes_task(video_id: str, task: str) -> None:
+    key = _notes_task_key(video_id, task)
+    if not key:
+        return
+    with _NOTES_TASK_LOCK:
+        _NOTES_TASK_ACTIVE.discard(key)
+
+
+def _is_notes_task_running(video_id: str, task: str) -> bool:
+    key = _notes_task_key(video_id, task)
+    if not key:
+        return False
+    with _NOTES_TASK_LOCK:
+        return key in _NOTES_TASK_ACTIVE
+
+
+def _notes_progress(video_id: str) -> dict:
+    vid = str(video_id or "").strip()
+    if not vid:
+        return {"video_id": "", "busy_task": "", "ask": {"in_progress": False}, "analyze": {"in_progress": False}}
+
+    ask = _get_ask_progress(vid)
+    analyze = _get_analyze_progress(vid)
+    ask_running = _is_notes_task_running(vid, "ask")
+    analyze_running = _is_notes_task_running(vid, "analyze")
+
+    if ask_running:
+        ask.setdefault("video_id", vid)
+        ask["status"] = "running"
+        ask["done"] = False
+        ask.setdefault("message", "Asking transcript...")
+    if analyze_running:
+        analyze.setdefault("video_id", vid)
+        analyze["status"] = "running"
+        analyze["done"] = False
+        analyze.setdefault("message", "Running analysis...")
+
+    ask["in_progress"] = bool(ask_running)
+    analyze["in_progress"] = bool(analyze_running)
+    busy_task = "ask" if ask_running else ("analyze" if analyze_running else "")
+
+    return {
+        "video_id": vid,
+        "busy_task": busy_task,
+        "ask": ask,
+        "analyze": analyze,
+    }
+
+
+def _public_file_index_by_video(*, ttl_sec: float = 20.0) -> dict[str, str]:
+    now = time()
+    with _PUBLIC_FILE_INDEX_LOCK:
+        built_at = float(_PUBLIC_FILE_INDEX.get("built_at") or 0.0)
+        by_video = _PUBLIC_FILE_INDEX.get("by_video")
+        if (
+            isinstance(by_video, dict)
+            and by_video
+            and (now - built_at) <= max(1.0, float(ttl_sec))
+        ):
+            return dict(by_video)
+
+        resolved: dict[str, tuple[float, str]] = {}
+        try:
+            storage = Path(STORAGE_DIR).expanduser().resolve()
+            if storage.exists() and storage.is_dir():
+                for p in storage.iterdir():
+                    if not p.is_file():
+                        continue
+                    name = str(p.name or "")
+                    low = name.lower()
+                    if low.endswith((".part", ".tmp", ".temp", ".ytdl", ".aria2")):
+                        continue
+                    vid = ""
+                    m = re.search(r"\[([A-Za-z0-9_-]{6,20})\]", name)
+                    if m:
+                        vid = str(m.group(1) or "").strip()
+                    else:
+                        stem = str(Path(name).stem or "").strip()
+                        if YT_ID_RE.match(stem):
+                            vid = stem
+                    if not vid:
+                        continue
+                    try:
+                        mtime = float(p.stat().st_mtime)
+                    except Exception:
+                        mtime = 0.0
+                    prev = resolved.get(vid)
+                    if (not prev) or (mtime >= prev[0]):
+                        resolved[vid] = (mtime, name)
+        except Exception:
+            resolved = {}
+
+        plain_map = {vid: val[1] for vid, val in resolved.items()}
+        _PUBLIC_FILE_INDEX["built_at"] = now
+        _PUBLIC_FILE_INDEX["by_video"] = plain_map
+        return dict(plain_map)
+
+
+def _active_direct_save() -> dict:
+    with _DIRECT_SAVE_LOCK:
+        row = _DIRECT_SAVE_ACTIVE.get("job")
+        if not isinstance(row, dict):
+            return {}
+        return dict(row)
 
 
 def _job_snapshot(job: dict) -> dict:
@@ -144,10 +331,10 @@ def _list_brew_jobs(*, active_only: bool = False) -> list[dict]:
 def _component_label(component: str) -> str:
     comp = normalize_component(component)
     if comp == "web":
-        return "Web UI"
+        return "UI part"
     if comp == "tg":
-        return "TG Chatbot"
-    return "All Components"
+        return "BE side"
+    return "UI + BE"
 
 
 def _component_job_snapshot(job: dict) -> dict:
@@ -637,6 +824,157 @@ def _resolve_video_title(video_id: str, rec: dict, transcript_path: Path, *, all
     return rec_title or video_id or "Video"
 
 
+def _slugify_text(value: str, max_len: int = 52) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "item"
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    if not text:
+        return "item"
+    return text[: max(8, int(max_len))]
+
+
+def _short_hash(value: str) -> str:
+    raw = str(value or "").encode("utf-8", errors="ignore")
+    return hashlib.sha1(raw).hexdigest()[:12]
+
+
+def _transcript_stamp(path: Path) -> str:
+    try:
+        st = path.stat()
+        return f"{int(st.st_mtime_ns)}:{int(st.st_size)}"
+    except Exception:
+        return "0:0"
+
+
+def _question_cache_key(question: str) -> str:
+    return re.sub(r"\s+", " ", str(question or "").strip().lower())
+
+
+def _qa_cached_answer(rec: dict, question: str, transcript_stamp: str) -> dict:
+    if not isinstance(rec, dict):
+        return {}
+    q_key = _question_cache_key(question)
+    rows = rec.get("video_qa_cache")
+    if not isinstance(rows, list):
+        return {}
+    for row in reversed(rows):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("question_key") or "") != q_key:
+            continue
+        if str(row.get("transcript_stamp") or "") != str(transcript_stamp or ""):
+            continue
+        answer = str(row.get("answer") or "").strip()
+        if answer:
+            return dict(row)
+    return {}
+
+
+def _save_qa_cache_entry(
+    rec: dict,
+    *,
+    question: str,
+    transcript_stamp: str,
+    answer: str,
+    llm_backend: str,
+    llm_backend_detail: str,
+) -> None:
+    if not isinstance(rec, dict):
+        return
+    entry = {
+        "question_key": _question_cache_key(question),
+        "question_text": str(question or "").strip(),
+        "transcript_stamp": str(transcript_stamp or ""),
+        "answer": str(answer or "").strip(),
+        "llm_backend": str(llm_backend or "").strip(),
+        "llm_backend_detail": str(llm_backend_detail or "").strip(),
+        "saved_at": _utc_now_iso(),
+    }
+    rows = rec.get("video_qa_cache")
+    if not isinstance(rows, list):
+        rows = []
+    filtered = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if (
+            str(row.get("question_key") or "") == entry["question_key"]
+            and str(row.get("transcript_stamp") or "") == entry["transcript_stamp"]
+        ):
+            continue
+        filtered.append(row)
+    filtered.append(entry)
+    rec["video_qa_cache"] = filtered[-QA_CACHE_LIMIT:]
+
+
+def _save_markdown_note(
+    *,
+    note_kind: str,
+    video_id: str,
+    title: str,
+    transcript_path: str,
+    youtube_url: str,
+    question: str = "",
+    answer: str = "",
+    analysis: str = "",
+    cached: bool = False,
+) -> str:
+    kind = str(note_kind or "note").strip().lower() or "note"
+    vid = _safe_video_id(video_id) or "video"
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    slug = _slugify_text(question or title or vid)
+    digest = _short_hash(f"{vid}|{kind}|{question}|{analysis}|{answer}|{stamp}")
+    try:
+        NOTES_EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return ""
+    out_path = NOTES_EXPORTS_DIR / f"{kind}_{stamp}_{vid}_{slug}_{digest}.md"
+    lines = [
+        f"# {kind.upper()}",
+        "",
+        f"- video_id: {vid}",
+        f"- title: {str(title or '').strip()}",
+        f"- youtube_url: {str(youtube_url or '').strip()}",
+        f"- transcript_path: {str(transcript_path or '').strip()}",
+        f"- cached: {'yes' if cached else 'no'}",
+        f"- created_at: {_utc_now_iso()}",
+        "",
+    ]
+    if question:
+        lines.extend(
+            [
+                "## Question",
+                "",
+                str(question or "").strip(),
+                "",
+            ]
+        )
+    if answer:
+        lines.extend(
+            [
+                "## Answer",
+                "",
+                str(answer or "").strip(),
+                "",
+            ]
+        )
+    if analysis:
+        lines.extend(
+            [
+                "## Analysis",
+                "",
+                str(analysis or "").strip(),
+                "",
+            ]
+        )
+    try:
+        out_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        return str(out_path)
+    except Exception:
+        return ""
+
+
 def _is_archive_record(rec: dict) -> bool:
     if not isinstance(rec, dict):
         return False
@@ -669,6 +1007,13 @@ def _resolve_record_public_url(_video_id: str, rec: dict) -> str:
     fallback_name = str(rec.get("filename") or rec.get("full_filename") or "").strip()
     if fallback_name:
         base = Path(fallback_name).name
+        if base:
+            return build_public_url(base)
+
+    vid = _safe_video_id(str(_video_id or ""))
+    if vid:
+        indexed = _public_file_index_by_video()
+        base = str(indexed.get(vid) or "").strip()
         if base:
             return build_public_url(base)
 
@@ -816,7 +1161,8 @@ def _video_detail(video_id: str) -> dict:
             save_index(idx)
     transcript_preview = ""
     if exists:
-        transcript_preview = path.read_text("utf-8", errors="ignore")[:9000].strip()
+        # Return full transcript so the UI can show the complete saved notes.
+        transcript_preview = path.read_text("utf-8", errors="ignore").strip()
     is_archive = _is_archive_record(rec)
     raw_archive_status = str(rec.get("status") or "")
     is_recording_status = bool(is_archive and raw_archive_status.lower() == "recording")
@@ -865,6 +1211,7 @@ def _video_detail(video_id: str) -> dict:
         "public_url": public_url,
         "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
         "thumbnail_url": thumb,
+        "notes_progress": _notes_progress(video_id),
     }
 
 
@@ -873,14 +1220,31 @@ def _research_list() -> list[dict]:
     out: list[dict] = []
     for item in items:
         intent = item.get("intent") if isinstance(item.get("intent"), dict) else {}
+        summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+        display_title = str(summary.get("display_title") or "").strip()
         run_kind = str(intent.get("run_kind") or "research").strip() or "research"
+        preview_videos_raw = item.get("preview_videos") if isinstance(item.get("preview_videos"), list) else []
+        preview_videos: list[dict] = []
+        for row in preview_videos_raw[:4]:
+            if not isinstance(row, dict):
+                continue
+            preview_videos.append(
+                {
+                    "video_id": str(row.get("video_id") or ""),
+                    "rank": int(row.get("rank") or 0),
+                    "title": str(row.get("title") or ""),
+                    "thumbnail_url": str(row.get("thumbnail_url") or ""),
+                }
+            )
         out.append(
             {
                 "run_id": str(item.get("run_id") or ""),
                 "goal_text": str(item.get("goal_text") or ""),
+                "display_title": display_title,
                 "status": str(item.get("status") or ""),
                 "run_kind": run_kind,
                 "topics": item.get("topics") or [],
+                "preview_videos": preview_videos,
                 "created_at": str(item.get("created_at") or ""),
                 "updated_at": str(item.get("updated_at") or ""),
                 "report_excerpt": str(item.get("report_excerpt") or ""),
@@ -889,21 +1253,64 @@ def _research_list() -> list[dict]:
     return out
 
 
+def _research_transcript_text(path_text: str, *, max_chars: int) -> tuple[str, bool]:
+    path_raw = str(path_text or "").strip()
+    if not path_raw:
+        return "", False
+    try:
+        p = Path(path_raw).expanduser().resolve()
+    except Exception:
+        return "", False
+    if not p.exists() or not p.is_file():
+        return "", False
+    try:
+        txt = p.read_text("utf-8", errors="ignore").strip()
+    except Exception:
+        return "", False
+    if not txt:
+        return "", False
+    if max_chars > 0 and len(txt) > max_chars:
+        clipped = txt[:max_chars].rstrip()
+        clipped += "\n...[truncated]"
+        return clipped, True
+    return txt, False
+
+
 def _research_detail(run_id: str) -> dict | None:
     item = get_public_research_run(run_id)
     if not item:
         return None
     intent = item.get("intent") if isinstance(item.get("intent"), dict) else {}
+    summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+    display_title = str(summary.get("display_title") or "").strip()
     run_kind = str(intent.get("run_kind") or "research").strip() or "research"
+    try:
+        transcript_max_chars = max(0, int((os.getenv("WEB_RESEARCH_TRANSCRIPT_MAX_CHARS") or "0").strip()))
+    except Exception:
+        transcript_max_chars = 0
+    raw_videos = item.get("videos") if isinstance(item.get("videos"), list) else []
+    videos: list[dict] = []
+    for row in raw_videos:
+        if not isinstance(row, dict):
+            continue
+        video = dict(row)
+        transcript_text, transcript_truncated = _research_transcript_text(
+            str(video.get("transcript_path") or ""),
+            max_chars=transcript_max_chars,
+        )
+        video["transcript_text"] = transcript_text
+        video["transcript_truncated"] = bool(transcript_truncated)
+        videos.append(video)
     return {
         "run_id": str(item.get("run_id") or ""),
         "goal_text": str(item.get("goal_text") or ""),
+        "display_title": display_title,
         "status": str(item.get("status") or ""),
         "run_kind": run_kind,
         "topics": item.get("topics") or [],
-        "summary": item.get("summary") or {},
+        "summary": summary,
         "report_text": str(item.get("report_text") or ""),
-        "videos": item.get("videos") or [],
+        "videos": videos,
         "created_at": str(item.get("created_at") or ""),
         "updated_at": str(item.get("updated_at") or ""),
     }
@@ -980,11 +1387,40 @@ def _run_analysis(video_id: str, force: bool = False, save: bool = True) -> dict
     if not transcript:
         raise RuntimeError("Transcript file is empty.")
 
+    started_ts = time()
+    try:
+        estimated_parts = max(1, int(_estimate_local_analysis_parts(transcript)))
+    except Exception:
+        estimated_parts = 1
+    _set_analyze_progress(
+        video_id,
+        status="running",
+        phase="preparing",
+        done=False,
+        error="",
+        message="Preparing analysis...",
+        started_at=_utc_now_iso(),
+        elapsed_sec=0.0,
+        chunk_completed=0,
+        chunk_total=estimated_parts,
+        generated_chars=0,
+        generated_tokens=0,
+    )
+
     lang_code, _lang_label = _analysis_output_language_for_text(transcript)
     ttl_sec = _analysis_ttl_seconds()
     if not force:
         cached, age_sec = _get_cached_ai_analysis(rec, ttl_sec, lang_code)
         if cached:
+            analysis_md_path = _save_markdown_note(
+                note_kind="analysis",
+                video_id=video_id,
+                title=_resolve_video_title(video_id, rec, path, allow_remote=False),
+                transcript_path=str(path),
+                youtube_url=f"https://www.youtube.com/watch?v={video_id}",
+                analysis=cached,
+                cached=True,
+            )
             if save:
                 rec["video_transcript_path"] = str(path)
                 if not str(rec.get("video_transcript_source") or "").strip():
@@ -994,21 +1430,92 @@ def _run_analysis(video_id: str, force: bool = False, save: bool = True) -> dict
                 rec["video_ai_analysis"] = cached
                 rec["video_ai_analysis_lang"] = lang_code
                 rec["video_ai_analysis_saved_at_epoch"] = int(time())
+                if analysis_md_path:
+                    rec["video_ai_analysis_md_path"] = analysis_md_path
                 idx[video_id] = rec
                 save_index(idx)
+            llm_backend = _extract_llm_backend_label(cached)
+            llm_detail = _extract_llm_backend_detail(cached)
+            _set_analyze_progress(
+                video_id,
+                status="completed",
+                phase="cached",
+                done=True,
+                error="",
+                message=f"Loaded cached analysis ({int(age_sec)}s old).",
+                elapsed_sec=round(time() - started_ts, 2),
+                chunk_completed=estimated_parts,
+                chunk_total=estimated_parts,
+                generated_chars=len(cached),
+                generated_tokens=max(1, len(cached) // 4),
+                llm_backend=llm_backend,
+                llm_backend_detail=llm_detail,
+            )
             return {
                 "analysis": cached,
                 "cached": True,
                 "cache_age_sec": age_sec,
                 "lang": lang_code,
-                "llm_backend": _extract_llm_backend_label(cached),
-                "llm_backend_detail": _extract_llm_backend_detail(cached),
+                "llm_backend": llm_backend,
+                "llm_backend_detail": llm_detail,
+                "chunk_completed": estimated_parts,
+                "chunk_total": estimated_parts,
+                "analysis_md_path": analysis_md_path,
             }
 
     title = _resolve_video_title(video_id, rec, path, allow_remote=False)
-    analysis = _analyze_transcript_with_ai_with_progress(title, transcript, None)
-    if not analysis.strip():
-        raise RuntimeError("LLM returned empty analysis.")
+    try:
+        def _progress_cb(chars: int, tokens: int | None, done: bool) -> None:
+            safe_chars = max(0, int(chars or 0))
+            safe_tokens = max(0, int(tokens or 0))
+            _set_analyze_progress(
+                video_id,
+                status="completed" if done else "running",
+                phase="analyzing",
+                done=bool(done),
+                elapsed_sec=round(time() - started_ts, 2),
+                generated_chars=safe_chars,
+                generated_tokens=safe_tokens,
+                message=(
+                    "Analysis completed."
+                    if done
+                    else f"Generating analysis... {safe_chars} chars"
+                ),
+            )
+
+        def _chunk_progress_cb(completed: int, total: int) -> None:
+            safe_total = max(1, int(total or 0))
+            safe_done = max(0, min(safe_total, int(completed or 0)))
+            _set_analyze_progress(
+                video_id,
+                status="running",
+                phase="chunking",
+                done=False,
+                elapsed_sec=round(time() - started_ts, 2),
+                chunk_completed=safe_done,
+                chunk_total=safe_total,
+                message=f"Analyzing transcript parts: {safe_done}/{safe_total}",
+            )
+
+        analysis = _analyze_transcript_with_ai_with_progress(
+            title,
+            transcript,
+            _progress_cb,
+            _chunk_progress_cb,
+        )
+        if not analysis.strip():
+            raise RuntimeError("LLM returned empty analysis.")
+    except Exception as exc:
+        _set_analyze_progress(
+            video_id,
+            status="failed",
+            phase="failed",
+            done=True,
+            error=str(exc),
+            message=f"Analysis failed: {exc}",
+            elapsed_sec=round(time() - started_ts, 2),
+        )
+        raise
 
     if save:
         if title and not _is_video_id_like(title):
@@ -1025,53 +1532,251 @@ def _run_analysis(video_id: str, force: bool = False, save: bool = True) -> dict
         idx[video_id] = rec
         save_index(idx)
 
+    llm_backend = _extract_llm_backend_label(analysis)
+    llm_detail = _extract_llm_backend_detail(analysis)
+    analysis_md_path = _save_markdown_note(
+        note_kind="analysis",
+        video_id=video_id,
+        title=title,
+        transcript_path=str(path),
+        youtube_url=f"https://www.youtube.com/watch?v={video_id}",
+        analysis=analysis,
+        cached=False,
+    )
+    if save and analysis_md_path:
+        rec["video_ai_analysis_md_path"] = analysis_md_path
+        idx[video_id] = rec
+        save_index(idx)
+    snap = _get_analyze_progress(video_id)
+    chunk_total = max(1, int(snap.get("chunk_total") or estimated_parts or 1))
+    chunk_completed = max(0, int(snap.get("chunk_completed") or 0))
+    if chunk_completed <= 0 or chunk_completed > chunk_total:
+        chunk_completed = chunk_total
+    generated_chars = max(int(snap.get("generated_chars") or 0), len(analysis))
+    generated_tokens = max(int(snap.get("generated_tokens") or 0), max(1, len(analysis) // 4))
+    _set_analyze_progress(
+        video_id,
+        status="completed",
+        phase="done",
+        done=True,
+        error="",
+        message="Analysis completed.",
+        elapsed_sec=round(time() - started_ts, 2),
+        chunk_completed=chunk_completed,
+        chunk_total=chunk_total,
+        generated_chars=generated_chars,
+        generated_tokens=generated_tokens,
+        llm_backend=llm_backend,
+        llm_backend_detail=llm_detail,
+    )
+
     return {
         "analysis": analysis,
         "cached": False,
         "cache_age_sec": 0,
         "lang": lang_code,
-        "llm_backend": _extract_llm_backend_label(analysis),
-        "llm_backend_detail": _extract_llm_backend_detail(analysis),
+        "llm_backend": llm_backend,
+        "llm_backend_detail": llm_detail,
+        "chunk_completed": chunk_completed,
+        "chunk_total": chunk_total,
+        "analysis_md_path": analysis_md_path,
     }
 
 
-def _run_qa(video_id: str, question: str) -> dict:
+def _store_analysis_result(
+    video_id: str,
+    analysis: str,
+    *,
+    llm_backend: str = "",
+    llm_backend_detail: str = "",
+) -> dict:
     idx = _load_index()
     rec = idx.get(video_id)
     if not isinstance(rec, dict):
         rec = {}
-    transcript_path = _resolve_transcript_path(video_id, rec)
-    if not transcript_path.exists():
+    path = _resolve_transcript_path(video_id, rec)
+    if not path.exists():
         raise RuntimeError("Transcript file is missing for this video.")
+    transcript = path.read_text("utf-8", errors="ignore").strip()
+    body = str(analysis or "").strip()
+    if not body:
+        raise RuntimeError("analysis is required")
 
-    title = _resolve_video_title(video_id, rec, transcript_path, allow_remote=False)
-    answer = answer_question_from_transcript(
-        question=(question or "").strip(),
-        transcript_path=str(transcript_path),
-        title_hint=title,
-        progress_cb=None,
+    lang_code, _lang_label = _analysis_output_language_for_text(transcript or body)
+    title = _resolve_video_title(video_id, rec, path, allow_remote=False)
+    backend_label = str(llm_backend or "").strip().lower() or _extract_llm_backend_label(body)
+    backend_detail = str(llm_backend_detail or "").strip() or _extract_llm_backend_detail(body)
+    analysis_md_path = _save_markdown_note(
+        note_kind="analysis",
+        video_id=video_id,
+        title=title,
+        transcript_path=str(path),
+        youtube_url=f"https://www.youtube.com/watch?v={video_id}",
+        analysis=body,
+        cached=False,
+    )
+
+    if title and not _is_video_id_like(title):
+        rec["video_title"] = title
+        rec["title"] = title
+    rec["video_transcript_path"] = str(path)
+    if not str(rec.get("video_transcript_source") or "").strip():
+        rec["video_transcript_source"] = "file"
+    if int(rec.get("video_transcript_chars") or 0) <= 0:
+        rec["video_transcript_chars"] = int(path.stat().st_size)
+    rec["video_ai_analysis"] = body
+    rec["video_ai_analysis_lang"] = lang_code
+    rec["video_ai_analysis_saved_at_epoch"] = int(time())
+    if analysis_md_path:
+        rec["video_ai_analysis_md_path"] = analysis_md_path
+    idx[video_id] = rec
+    save_index(idx)
+    return {
+        "analysis": body,
+        "cached": False,
+        "cache_age_sec": 0,
+        "lang": lang_code,
+        "llm_backend": backend_label or "browser",
+        "llm_backend_detail": backend_detail or "browser",
+        "analysis_md_path": analysis_md_path,
+    }
+
+
+def _run_qa(video_id: str, question: str) -> dict:
+    started_ts = time()
+    _set_ask_progress(
+        video_id,
+        status="running",
+        phase="preparing",
+        done=False,
+        error="",
+        message="Preparing transcript context...",
+        started_at=_utc_now_iso(),
+        elapsed_sec=0.0,
+        cached=False,
     )
     try:
-        save_transcript_qa_entry(
+        idx = _load_index()
+        rec = idx.get(video_id)
+        if not isinstance(rec, dict):
+            rec = {}
+        transcript_path = _resolve_transcript_path(video_id, rec)
+        if not transcript_path.exists():
+            raise RuntimeError("Transcript file is missing for this video.")
+        question_text = str(question or "").strip()
+        title = _resolve_video_title(video_id, rec, transcript_path, allow_remote=False)
+        transcript_stamp = _transcript_stamp(transcript_path)
+        cached_row = _qa_cached_answer(rec, question_text, transcript_stamp)
+        cached = bool(cached_row)
+        if cached:
+            answer = str(cached_row.get("answer") or "").strip()
+            llm_backend = str(cached_row.get("llm_backend") or "").strip() or _extract_llm_backend_label(answer)
+            llm_detail = str(cached_row.get("llm_backend_detail") or "").strip() or _extract_llm_backend_detail(answer)
+            _set_ask_progress(
+                video_id,
+                status="completed",
+                phase="cached",
+                done=True,
+                error="",
+                message="Loaded cached answer.",
+                elapsed_sec=round(time() - started_ts, 2),
+                answer_chars=len(answer),
+                cached=True,
+                llm_backend=llm_backend,
+                llm_backend_detail=llm_detail,
+            )
+        else:
+            _set_ask_progress(
+                video_id,
+                status="running",
+                phase="answering",
+                done=False,
+                error="",
+                message="Generating answer from transcript...",
+                elapsed_sec=round(time() - started_ts, 2),
+                cached=False,
+            )
+            answer = answer_question_from_transcript(
+                question=question_text,
+                transcript_path=str(transcript_path),
+                title_hint=title,
+                progress_cb=None,
+            )
+            llm_backend = _extract_llm_backend_label(answer)
+            llm_detail = _extract_llm_backend_detail(answer)
+            _save_qa_cache_entry(
+                rec,
+                question=question_text,
+                transcript_stamp=transcript_stamp,
+                answer=answer,
+                llm_backend=llm_backend,
+                llm_backend_detail=llm_detail,
+            )
+            idx[video_id] = rec
+            try:
+                save_index(idx)
+            except Exception:
+                pass
+            _set_ask_progress(
+                video_id,
+                status="completed",
+                phase="done",
+                done=True,
+                error="",
+                message="Answer ready.",
+                elapsed_sec=round(time() - started_ts, 2),
+                answer_chars=len(answer),
+                cached=False,
+                llm_backend=llm_backend,
+                llm_backend_detail=llm_detail,
+            )
+        qa_md_path = _save_markdown_note(
+            note_kind="ask",
             video_id=video_id,
+            title=title,
             transcript_path=str(transcript_path),
-            question=(question or "").strip(),
-            answer=(answer or "").strip(),
-            source="web",
-            chat_id=None,
-            lang="",
-            extra={
-                "title": title,
-                "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
-            },
+            youtube_url=f"https://www.youtube.com/watch?v={video_id}",
+            question=question_text,
+            answer=answer,
+            cached=cached,
         )
-    except Exception:
-        pass
-    return {
-        "answer": answer,
-        "llm_backend": _extract_llm_backend_label(answer),
-        "llm_backend_detail": _extract_llm_backend_detail(answer),
-    }
+        try:
+            save_transcript_qa_entry(
+                video_id=video_id,
+                transcript_path=str(transcript_path),
+                question=question_text,
+                answer=(answer or "").strip(),
+                source="web",
+                chat_id=None,
+                lang="",
+                extra={
+                    "title": title,
+                    "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
+                    "cached": bool(cached),
+                    "qa_md_path": qa_md_path,
+                },
+            )
+        except Exception:
+            pass
+        return {
+            "answer": answer,
+            "llm_backend": llm_backend,
+            "llm_backend_detail": llm_detail,
+            "cached": bool(cached),
+            "qa_md_path": qa_md_path,
+        }
+    except Exception as exc:
+        _set_ask_progress(
+            video_id,
+            status="failed",
+            phase="failed",
+            done=True,
+            error=str(exc),
+            message=f"Ask failed: {exc}",
+            elapsed_sec=round(time() - started_ts, 2),
+            cached=False,
+        )
+        raise
 
 
 class _WebNullBot:
@@ -1347,13 +2052,46 @@ def _start_server_save(url: str) -> dict:
     if not src_url:
         raise RuntimeError("url is required")
     video_id = _safe_video_id(extract_youtube_id(src_url) or "")
-    save_job_id = uuid.uuid4().hex
     public_url = ""
     if video_id:
         rec = _load_index().get(video_id)
         if isinstance(rec, dict):
             public_url = _resolve_record_public_url(video_id, rec)
     title = _resolve_direct_title(src_url, video_id, "")
+    if public_url:
+        return {
+            "save_job_id": "",
+            "video_id": video_id,
+            "title": title,
+            "url": src_url,
+            "public_url": public_url,
+            "status": "already_saved",
+        }
+
+    active = _active_direct_save()
+    active_status = str(active.get("status") or "").strip().lower()
+    if active and active_status == "running":
+        return {
+            "save_job_id": str(active.get("save_job_id") or ""),
+            "video_id": str(active.get("video_id") or ""),
+            "title": str(active.get("title") or ""),
+            "url": str(active.get("url") or ""),
+            "public_url": "",
+            "status": "busy",
+            "busy": True,
+            "busy_message": "Another save is already running. Please wait until it finishes.",
+        }
+
+    save_job_id = uuid.uuid4().hex
+    with _DIRECT_SAVE_LOCK:
+        _DIRECT_SAVE_ACTIVE["job"] = {
+            "save_job_id": save_job_id,
+            "video_id": video_id,
+            "title": title,
+            "url": src_url,
+            "status": "running",
+            "started_at": _utc_now_iso(),
+        }
 
     def _runner() -> None:
         async def _run_async():
@@ -1376,6 +2114,10 @@ def _start_server_save(url: str) -> dict:
             print(f"web save runner failed for {src_url}: {e}", flush=True)
             traceback.print_exc()
         finally:
+            with _DIRECT_SAVE_LOCK:
+                current = _DIRECT_SAVE_ACTIVE.get("job")
+                if isinstance(current, dict) and str(current.get("save_job_id") or "") == save_job_id:
+                    _DIRECT_SAVE_ACTIVE.clear()
             try:
                 loop.close()
             except Exception:
@@ -1493,6 +2235,10 @@ def _handle_brew_progress(job_id: str, event: dict) -> None:
         patch["query_stats"] = []
     elif etype == "queries_ready":
         patch["queries"] = evt.get("queries") if isinstance(evt.get("queries"), list) else []
+    elif etype in ("search_query_started", "search_query_processed"):
+        patch["status"] = "running"
+        patch["search_stats"] = evt.get("search_stats") if isinstance(evt.get("search_stats"), dict) else {}
+        patch["query_stats"] = evt.get("query_stats") if isinstance(evt.get("query_stats"), list) else []
     elif etype == "candidates_ready":
         patch["candidate_videos"] = evt.get("videos") if isinstance(evt.get("videos"), list) else []
         patch["total_candidates"] = int(evt.get("total_candidates") or 0)
@@ -1627,21 +2373,19 @@ def _run_direct_video(url: str) -> dict:
         msg = str(e or "")
         low = msg.lower()
         if ("confirm you're not a bot" in low) or ("confirm you’re not a bot" in low):
-            # Fallback: start normal server-side save when direct URL extraction is blocked.
-            save_result = _start_server_save(src_url)
+            # Do not auto-start server save; require explicit user action from UI.
             return {
-                "video_id": str(save_result.get("video_id") or video_id),
-                "title": _resolve_direct_title(
-                    src_url,
-                    str(save_result.get("video_id") or video_id),
-                    str(save_result.get("title") or ""),
-                ),
-                "download_url": str(save_result.get("public_url") or ""),
+                "video_id": video_id,
+                "title": _resolve_direct_title(src_url, video_id, ""),
+                "download_url": "",
                 "media_type": "video",
                 "temporary": True,
-                "save_started": True,
-                "save_job_id": str(save_result.get("save_job_id") or ""),
-                "public_url": str(save_result.get("public_url") or ""),
+                "save_started": False,
+                "save_status": "manual_required",
+                "save_busy": False,
+                "save_busy_message": "",
+                "save_job_id": "",
+                "public_url": "",
                 "fallback_reason": "youtube_antibot_direct_blocked",
             }
         raise
@@ -1921,6 +2665,22 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, {"ok": True, "item": _video_detail(video_id)})
                 return
 
+            if path == "/api/analyze_progress":
+                qs = parse_qs(parsed.query)
+                video_id = _safe_video_id((qs.get("video_id") or [""])[0])
+                if not video_id:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "video_id is required"})
+                    return
+                item = _get_analyze_progress(video_id)
+                if _is_notes_task_running(video_id, "analyze"):
+                    item.setdefault("video_id", video_id)
+                    item["status"] = "running"
+                    item["done"] = False
+                    item.setdefault("message", "Running analysis...")
+                item["in_progress"] = bool(_is_notes_task_running(video_id, "analyze"))
+                self._send_json(HTTPStatus.OK, {"ok": True, "item": item})
+                return
+
             if path == "/api/researches":
                 self._send_json(HTTPStatus.OK, {"ok": True, "items": _research_list()})
                 return
@@ -2004,7 +2764,61 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
                 force = _as_bool(payload.get("force"), default=False)
                 save = _as_bool(payload.get("save"), default=True)
-                result = _run_analysis(video_id, force=force, save=save)
+                if not _try_start_notes_task(video_id, "analyze"):
+                    snap = _get_analyze_progress(video_id)
+                    if not isinstance(snap, dict):
+                        snap = {}
+                    snap.setdefault("video_id", video_id)
+                    snap["status"] = "running"
+                    snap["done"] = False
+                    snap.setdefault("message", "Analysis already running.")
+                    snap["in_progress"] = True
+                    self._send_json(
+                        HTTPStatus.OK,
+                        {
+                            "ok": True,
+                            "video_id": video_id,
+                            "elapsed_sec": round(perf_counter() - started, 2),
+                            "status": "already_running",
+                            "in_progress": True,
+                            "item": snap,
+                            "analysis": "",
+                            "cached": False,
+                            "cache_age_sec": 0,
+                            "lang": "",
+                        },
+                    )
+                    return
+                try:
+                    result = _run_analysis(video_id, force=force, save=save)
+                finally:
+                    _finish_notes_task(video_id, "analyze")
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "video_id": video_id,
+                        "elapsed_sec": round(perf_counter() - started, 2),
+                        **result,
+                    },
+                )
+                return
+
+            if path == "/api/analyze_store":
+                video_id = _safe_video_id(str(payload.get("video_id") or ""))
+                if not video_id:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "video_id is required"})
+                    return
+                analysis = str(payload.get("analysis") or "").strip()
+                if not analysis:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "analysis is required"})
+                    return
+                result = _store_analysis_result(
+                    video_id,
+                    analysis,
+                    llm_backend=str(payload.get("llm_backend") or ""),
+                    llm_backend_detail=str(payload.get("llm_backend_detail") or ""),
+                )
                 self._send_json(
                     HTTPStatus.OK,
                     {
@@ -2025,7 +2839,33 @@ class AppHandler(BaseHTTPRequestHandler):
                 if not question:
                     self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "question is required"})
                     return
-                result = _run_qa(video_id, question)
+                if not _try_start_notes_task(video_id, "ask"):
+                    snap = _get_ask_progress(video_id)
+                    if not isinstance(snap, dict):
+                        snap = {}
+                    snap.setdefault("video_id", video_id)
+                    snap["status"] = "running"
+                    snap["done"] = False
+                    snap.setdefault("message", "Ask already running.")
+                    snap["in_progress"] = True
+                    self._send_json(
+                        HTTPStatus.OK,
+                        {
+                            "ok": True,
+                            "video_id": video_id,
+                            "elapsed_sec": round(perf_counter() - started, 2),
+                            "status": "already_running",
+                            "in_progress": True,
+                            "item": snap,
+                            "answer": "",
+                            "cached": False,
+                        },
+                    )
+                    return
+                try:
+                    result = _run_qa(video_id, question)
+                finally:
+                    _finish_notes_task(video_id, "ask")
                 self._send_json(
                     HTTPStatus.OK,
                     {

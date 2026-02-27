@@ -1592,7 +1592,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data[PENDING_MODE_KEY] = MODE_ASK_QUESTION
         return
 
-    await _run_save_url_mode(update, context, msg, url)
+    await _run_direct_url_mode(msg, url)
 
 
 async def start_download_from_external(

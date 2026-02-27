@@ -15,7 +15,7 @@
   <rect x="18" y="18" width="220" height="220" rx="50" fill="url(#bg)"/>
   <rect x="34" y="38" width="188" height="180" rx="34" fill="url(#panel)"/>
 
-  <path d="M110 95c0-8 8-13 15-9l56 32c7 4 7 14 0 18l-56 32c-7 4-15-1-15-9V95z" fill="#ff0033"/>
+  <path d="M92 95c0-8 8-13 15-9l56 32c7 4 7 14 0 18l-56 32c-7 4-15-1-15-9V95z" fill="#ff0033"/>
 
   <path d="M82 86L60 114l22 28" fill="none" stroke="#0f0f0f" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M174 86l22 28-22 28" fill="none" stroke="#0f0f0f" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>

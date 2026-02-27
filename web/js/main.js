@@ -11,10 +11,10 @@ const el = {
   ingestForm: document.getElementById("ingestForm"),
   ingestBtn: document.getElementById("ingestBtn"),
   urlInput: document.getElementById("urlInput"),
-  forceTranscript: document.getElementById("forceTranscript"),
   ingestMeta: document.getElementById("ingestMeta"),
   askForm: document.getElementById("askForm"),
   askBtn: document.getElementById("askBtn"),
+  askModeSelect: document.getElementById("askModeSelect"),
   questionInput: document.getElementById("questionInput"),
   qaMeta: document.getElementById("qaMeta"),
   qaOutput: document.getElementById("qaOutput"),
@@ -22,8 +22,8 @@ const el = {
   notesSearchInput: document.getElementById("notesSearchInput"),
   notesVideoList: document.getElementById("notesVideoList"),
   analyzeBtn: document.getElementById("analyzeBtn"),
+  analyzeModeSelect: document.getElementById("analyzeModeSelect"),
   analyzeSection: document.getElementById("analyzeSection"),
-  forceAnalyze: document.getElementById("forceAnalyze"),
   analysisMeta: document.getElementById("analysisMeta"),
   analysisOutput: document.getElementById("analysisOutput"),
   videoTitle: document.getElementById("videoTitle"),
@@ -97,24 +97,51 @@ const el = {
   componentLog: document.getElementById("componentLog"),
 };
 
-function switchPage(page) {
-  state.page = page;
-  document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.page === page));
-  document.querySelectorAll(".page").forEach((p) => p.classList.toggle("active", p.id === `page-${page}`));
+function _normalizePage(raw) {
+  const page = String(raw || "").trim().toLowerCase();
+  const allowed = new Set(["direct", "archive", "transcript", "juice", "advanced"]);
+  return allowed.has(page) ? page : "direct";
+}
+
+function switchPage(page, persist = true) {
+  const safePage = _normalizePage(page);
+  state.page = safePage;
+  document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.page === safePage));
+  document.querySelectorAll(".page").forEach((p) => p.classList.toggle("active", p.id === `page-${safePage}`));
+  if (persist) writeUiPrefs();
 }
 
 const RECENT_DIRECT_KEY = "ytbot_recent_direct_searches_v2";
 const RECENT_DIRECT_KEY_LEGACY = "ytbot_recent_direct_searches_v1";
 const RECENT_DIRECT_LIMIT = 10;
+const DIRECT_SAVE_STALE_MS = 20 * 60 * 1000;
 const JUICE_FILTERS_KEY = "ytbot_juice_filters_v1";
 const UI_PREFS_KEY = "ytbot_ui_prefs_v1";
+const EXEC_MODE_PREFS_KEY = "ytbot_exec_mode_prefs_v2";
 const NO_CANDIDATES_TEXT = "No candidate videos found. Try a broader goal.";
 const GENERIC_NO_CANDIDATES_ERROR = "No candidate videos matched your topic/filters. Try a broader topic or adjust limits.";
+const BROWSER_WEBLLM_IMPORT = "https://esm.run/@mlc-ai/web-llm";
+const BROWSER_WEBLLM_MODELS = [
+  "Llama-3.2-3B-Instruct-q4f16_1-MLC",
+  "Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
+  "Llama-3.2-1B-Instruct-q4f16_1-MLC",
+];
+
+const browserLlmRuntime = {
+  provider: "",
+  model: "",
+  session: null,
+  engine: null,
+  loading: null,
+};
 
 const I18N = {
   en: {
     "brand.sub": "YouTube operations console",
     "label.language": "Language",
+    "label.exec_mode": "Mode",
+    "mode.browser_fast": "Browser (faster)",
+    "mode.server_side": "Server side (longer)",
     "btn.theme_to_night": "Night Mode",
     "btn.theme_to_day": "Day Mode",
     "btn.refresh": "Refresh",
@@ -127,6 +154,8 @@ const I18N = {
     "btn.start_brewing": "Start Brewing",
     "btn.download_video": "Download Video",
     "btn.download_audio": "Download Audio",
+    "btn.download_to_server": "Download To Server",
+    "btn.download_from_server": "Download From Server",
     "btn.open_notes": "Open Notes",
     "btn.stop_saving": "Stop Saving",
     "btn.stop_saving_if_running": "Stop Saving (If Running)",
@@ -137,6 +166,7 @@ const I18N = {
     "tab.archive": "Save Live",
     "tab.transcript": "Video Notes",
     "tab.juice": "Knowledge Brew",
+    "tab.info": "Info",
     "direct.head.title": "Video/Audio Download",
     "direct.head.desc": "Paste a YouTube URL, preview it, then generate download buttons.",
     "direct.saved_videos": "Saved Videos",
@@ -155,9 +185,13 @@ const I18N = {
     "notes.ask_transcript": "Ask Transcript",
     "notes.analysis": "Analysis",
     "notes.force_fresh": "force fresh",
-    "notes.transcript_preview": "Transcript Preview",
+    "notes.transcript_preview": "Full Transcript",
     "juice.head.title": "Knowledge Brew",
     "juice.head.desc": "Run caption-aware topic research and follow live progress by step.",
+    "juice.how_title": "How this works",
+    "juice.how_line_1": "Brew compares multiple owner videos on one topic, then extracts common patterns and differences.",
+    "juice.how_line_2": "Use it to compress many hours of watch time into actionable lessons and practical next steps.",
+    "juice.how_line_3": "Great for success-story learning, business model understanding, or comparing creators in the same niche.",
     "juice.brew_title": "Brew Knowledge Juice",
     "juice.max_videos": "Max videos",
     "juice.max_queries": "Max queries",
@@ -202,6 +236,10 @@ const I18N = {
     "status.status": "status",
     "status.running_analysis": "Running analysis...",
     "status.asking_transcript": "Asking transcript...",
+    "status.analysis_already_running": "Analysis is already in progress. Please wait.",
+    "status.ask_already_running": "Ask is already in progress. Please wait.",
+    "status.analysis_blocked_by_ask": "Ask is running. Wait until it finishes.",
+    "status.ask_blocked_by_analysis": "Analysis is running. Wait until it finishes.",
     "status.saving_transcript": "Saving transcript...",
     "status.preparing_download_links": "Preparing download links...",
     "status.starting_live_recording": "Starting live recording...",
@@ -221,10 +259,15 @@ const I18N = {
     "status.fast_mode": "fast mode",
     "status.updated_at": "Updated: {time}",
     "status.error": "Error: {error}",
+    "status.browser_loading_model": "Preparing browser model...",
+    "status.browser_model_ready": "Browser model ready.",
   },
   uk: {
     "brand.sub": "Консоль YouTube-операцій",
     "label.language": "Мова",
+    "label.exec_mode": "Режим",
+    "mode.browser_fast": "Браузер (швидше)",
+    "mode.server_side": "Сервер (довше)",
     "btn.theme_to_night": "Нічний режим",
     "btn.theme_to_day": "Денний режим",
     "btn.refresh": "Оновити",
@@ -237,6 +280,8 @@ const I18N = {
     "btn.start_brewing": "Почати збір",
     "btn.download_video": "Завантажити відео",
     "btn.download_audio": "Завантажити аудіо",
+    "btn.download_to_server": "Завантажити на сервер",
+    "btn.download_from_server": "Завантажити з сервера",
     "btn.open_notes": "Відкрити нотатки",
     "btn.stop_saving": "Зупинити збереження",
     "btn.stop_saving_if_running": "Зупинити збереження (якщо активне)",
@@ -247,6 +292,7 @@ const I18N = {
     "tab.archive": "Зберегти LIVE",
     "tab.transcript": "Нотатки відео",
     "tab.juice": "Knowledge Brew",
+    "tab.info": "Інфо",
     "direct.head.title": "Завантаження відео/аудіо",
     "direct.head.desc": "Вставте URL YouTube, перегляньте превʼю та згенеруйте кнопки завантаження.",
     "direct.saved_videos": "Збережені відео",
@@ -265,9 +311,13 @@ const I18N = {
     "notes.ask_transcript": "Запитати по транскрипту",
     "notes.analysis": "Аналіз",
     "notes.force_fresh": "примусово свіжий",
-    "notes.transcript_preview": "Попередній перегляд транскрипту",
+    "notes.transcript_preview": "Повний транскрипт",
     "juice.head.title": "Knowledge Brew",
     "juice.head.desc": "Запускайте дослідження теми та відстежуйте прогрес крок за кроком.",
+    "juice.how_title": "Як це працює",
+    "juice.how_line_1": "Brew порівнює кілька відео власників в одній темі та виділяє спільні патерни і відмінності.",
+    "juice.how_line_2": "Це стискає багато годин перегляду в практичні висновки та конкретні наступні кроки.",
+    "juice.how_line_3": "Підходить для розбору success-історій, бізнес-моделей або порівняння авторів у ніші.",
     "juice.brew_title": "Зібрати Knowledge Juice",
     "juice.max_videos": "Макс. відео",
     "juice.max_queries": "Макс. запитів",
@@ -312,6 +362,10 @@ const I18N = {
     "status.status": "статус",
     "status.running_analysis": "Виконується аналіз...",
     "status.asking_transcript": "Ставимо питання до транскрипту...",
+    "status.analysis_already_running": "Аналіз уже виконується. Будь ласка, зачекайте.",
+    "status.ask_already_running": "Запит уже виконується. Будь ласка, зачекайте.",
+    "status.analysis_blocked_by_ask": "Запит уже виконується. Дочекайтеся завершення.",
+    "status.ask_blocked_by_analysis": "Аналіз уже виконується. Дочекайтеся завершення.",
     "status.saving_transcript": "Зберігаємо транскрипт...",
     "status.preparing_download_links": "Готуємо посилання для завантаження...",
     "status.starting_live_recording": "Запускаємо LIVE-запис...",
@@ -331,6 +385,8 @@ const I18N = {
     "status.fast_mode": "швидкий режим",
     "status.updated_at": "Оновлено: {time}",
     "status.error": "Помилка: {error}",
+    "status.browser_loading_model": "Підготовка браузерної моделі...",
+    "status.browser_model_ready": "Браузерна модель готова.",
   },
 };
 
@@ -367,15 +423,29 @@ function readUiPrefs() {
     return {
       lang: _normalizeLang(raw.lang),
       theme: _normalizeTheme(themeRaw),
+      page: _normalizePage(raw.page),
+      selected_research_id: String(raw.selected_research_id || "").trim(),
+      selected_job_id: String(raw.selected_job_id || "").trim(),
+      selected_video_id: String(raw.selected_video_id || "").trim(),
     };
   } catch (_err) {
-    return { lang: "en", theme: "day" };
+    return { lang: "en", theme: "day", page: "direct", selected_research_id: "", selected_job_id: "", selected_video_id: "" };
   }
 }
 
 function writeUiPrefs() {
   try {
-    window.localStorage.setItem(UI_PREFS_KEY, JSON.stringify({ lang: _uiLang, theme: _uiTheme }));
+    window.localStorage.setItem(
+      UI_PREFS_KEY,
+      JSON.stringify({
+        lang: _uiLang,
+        theme: _uiTheme,
+        page: _normalizePage(state.page),
+        selected_research_id: String(state.selectedResearchId || "").trim(),
+        selected_job_id: String(state.selectedJobId || "").trim(),
+        selected_video_id: String(state.selectedVideoId || "").trim(),
+      })
+    );
   } catch (_err) {
     // no-op
   }
@@ -415,6 +485,53 @@ function applyLanguage(lang, persist = true) {
 
   setJuiceFiltersToggleLabel();
   if (persist) writeUiPrefs();
+}
+
+function _normalizeExecMode(raw) {
+  return String(raw || "").trim().toLowerCase() === "browser" ? "browser" : "server";
+}
+
+function readExecModePrefs() {
+  const defaults = { ask_mode: "browser", analyze_mode: "browser" };
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(EXEC_MODE_PREFS_KEY) || "{}");
+    return {
+      ask_mode: _normalizeExecMode(raw.ask_mode || defaults.ask_mode),
+      analyze_mode: _normalizeExecMode(raw.analyze_mode || defaults.analyze_mode),
+    };
+  } catch (_err) {
+    return defaults;
+  }
+}
+
+function writeExecModePrefs(prefs) {
+  const payload = prefs && typeof prefs === "object" ? prefs : readExecModePrefs();
+  try {
+    window.localStorage.setItem(EXEC_MODE_PREFS_KEY, JSON.stringify(payload));
+  } catch (_err) {
+    // no-op
+  }
+}
+
+function applyExecModePrefs() {
+  const prefs = readExecModePrefs();
+  if (el.askModeSelect) el.askModeSelect.value = _normalizeExecMode(prefs.ask_mode);
+  if (el.analyzeModeSelect) el.analyzeModeSelect.value = _normalizeExecMode(prefs.analyze_mode);
+}
+
+function persistExecModePrefs() {
+  writeExecModePrefs({
+    ask_mode: _normalizeExecMode(el.askModeSelect?.value || "browser"),
+    analyze_mode: _normalizeExecMode(el.analyzeModeSelect?.value || "browser"),
+  });
+}
+
+function currentAskMode() {
+  return _normalizeExecMode(el.askModeSelect?.value || "browser");
+}
+
+function currentAnalyzeMode() {
+  return _normalizeExecMode(el.analyzeModeSelect?.value || "browser");
 }
 
 function getVideoThumb(videoId) {
@@ -538,8 +655,13 @@ function researchHasResult(item) {
   const obj = item && typeof item === "object" ? item : {};
   const status = String(obj.status || "").trim().toLowerCase();
   const excerpt = String(obj.report_excerpt || "").trim();
-  const notFailed = !/^research failed:/i.test(excerpt);
-  return ["completed", "done"].includes(status) && Boolean(excerpt) && notFailed;
+  const reportText = String(obj.report_text || "").trim();
+  const lowCombined = `${excerpt}\n${reportText}`.toLowerCase();
+  const notFailed = !lowCombined.includes("research failed:");
+  const summaryObj = obj && typeof obj.summary === "object" ? obj.summary : {};
+  const hasSummaryData = summaryObj && Object.keys(summaryObj).length > 0;
+  const hasReportData = Boolean(excerpt || reportText || hasSummaryData);
+  return ["completed", "done"].includes(status) && hasReportData && notFailed;
 }
 
 function formatResearchDetail(item) {
@@ -578,6 +700,99 @@ function formatResearchDetail(item) {
   return `${summaryAndSteps}\n\nSimilarities\n${simBlock}\n\nDifferences\n${diffBlock}`.trim();
 }
 
+function researchVideoThumb(video) {
+  const row = video && typeof video === "object" ? video : {};
+  const direct = String(row.thumbnail_url || "").trim();
+  if (direct) return direct;
+  const vid = String(row.video_id || "").trim() || extractYouTubeVideoId(String(row.url || "").trim());
+  return vid ? `https://i.ytimg.com/vi/${vid}/hqdefault.jpg` : "";
+}
+
+function researchDisplayTitle(item) {
+  const row = item && typeof item === "object" ? item : {};
+  const display = String(row.display_title || "").trim();
+  if (display) return display;
+  const goal = String(row.goal_text || "").trim();
+  if (goal) return goal;
+  return String(row.run_id || "").trim() || "Research";
+}
+
+function researchPreviewThumbs(item) {
+  const row = item && typeof item === "object" ? item : {};
+  const previews = Array.isArray(row.preview_videos) ? row.preview_videos : [];
+  return previews
+    .slice(0, 4)
+    .map((x) => {
+      const one = x && typeof x === "object" ? x : {};
+      const thumb = String(one.thumbnail_url || "").trim() || researchVideoThumb(one);
+      if (!thumb) return "";
+      return `<img class="research-list-thumb" src="${escapeHtml(thumb)}" alt="" loading="lazy" />`;
+    })
+    .filter(Boolean)
+    .join("");
+}
+
+function formatResearchDetailHtml(item) {
+  const summaryText = formatResearchDetail(item);
+  const videos = Array.isArray(item && item.videos) ? item.videos : [];
+  const videosHtml = videos.length
+    ? videos.map((v, idx) => {
+      const row = v && typeof v === "object" ? v : {};
+      const title = String(row.title || row.video_id || `Video ${idx + 1}`).trim();
+      const channel = String(row.channel || "").trim();
+      const videoId = String(row.video_id || "").trim();
+      const url = String(row.url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : "")).trim();
+      const safeUrlVal = safeHref(url || "#");
+      const thumb = researchVideoThumb(row);
+      const transcript = String(row.transcript_text || "").replace(/\r/g, "").trim();
+      const transcriptLow = transcript.toLowerCase();
+      const transcriptPlaceholder = transcriptLow === "transcript not saved."
+        || transcriptLow === "transcript not available."
+        || transcriptLow === "transcript not available";
+      const transcriptSaved = Boolean(transcript) && !transcriptPlaceholder;
+      const transcriptChars = Number(row.transcript_chars || 0);
+      const truncated = Boolean(row.transcript_truncated);
+      const transcriptLabel = transcriptSaved
+        ? `saved${transcriptChars > 0 ? ` • ${transcriptChars} chars` : ""}${truncated ? " • truncated" : ""}`
+        : "not saved";
+      return `
+        <article class="video-card research-video-card">
+          ${
+  thumb
+    ? (
+      url
+        ? `<a class="research-video-thumb-link" href="${escapeHtml(safeUrlVal)}" target="_blank" rel="noreferrer"><img class="research-video-thumb" src="${escapeHtml(thumb)}" alt="" loading="lazy" /></a>`
+        : `<img class="research-video-thumb" src="${escapeHtml(thumb)}" alt="" loading="lazy" />`
+    )
+    : ""
+}
+          <div class="body">
+            <p class="title">${
+  url
+    ? `<a href="${escapeHtml(safeUrlVal)}" target="_blank" rel="noreferrer">${escapeHtml(title)}</a>`
+    : escapeHtml(title)
+}</p>
+            <p class="meta-line">${escapeHtml(channel || "Unknown channel")}</p>
+            ${
+  transcriptSaved
+    ? `<p class="meta-line">Transcript: ${escapeHtml(transcriptLabel)}</p><pre class="research-transcript">${escapeHtml(transcript)}</pre>`
+    : ``
+}
+          </div>
+        </article>
+      `;
+    }).join("")
+    : `<p class="meta">No research videos saved.</p>`;
+
+  return `
+    <div class="research-detail-rich">
+      <h4 class="brew-section-label">Videos And Transcripts</h4>
+      <div class="cards media-feed research-videos-feed">${videosHtml}</div>
+      <pre class="research-summary">${escapeHtml(summaryText)}</pre>
+    </div>
+  `;
+}
+
 function normalizeRecentDirectEntry(item) {
   const entry = item && typeof item === "object" ? item : {};
   const url = String(entry.url || "").trim();
@@ -614,6 +829,43 @@ function normalizeRecentDirectEntry(item) {
   };
 }
 
+function _parseTimeMs(raw) {
+  const ts = Date.parse(String(raw || "").trim());
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function _saveStatus(raw) {
+  return String(raw || "").trim().toLowerCase();
+}
+
+function _saveActivityMs(entry) {
+  const row = entry && typeof entry === "object" ? entry : {};
+  return Math.max(
+    _parseTimeMs(row.save_requested_at),
+    _parseTimeMs(row.updated_at),
+    _parseTimeMs(row.created_at)
+  );
+}
+
+function _isStaleRunningSave(entry, nowMs = Date.now()) {
+  const row = entry && typeof entry === "object" ? entry : {};
+  const status = _saveStatus(row.save_status);
+  if (status !== "started" && status !== "running") return false;
+  const activityMs = _saveActivityMs(row);
+  if (activityMs <= 0) return true;
+  return (nowMs - activityMs) > DIRECT_SAVE_STALE_MS;
+}
+
+function effectiveRecentSaveStatus(entry, nowMs = Date.now()) {
+  const row = entry && typeof entry === "object" ? entry : {};
+  if (String(row.saved_video_url || "").trim()) return "saved";
+  const status = _saveStatus(row.save_status);
+  if ((status === "started" || status === "running") && _isStaleRunningSave(row, nowMs)) {
+    return "error";
+  }
+  return status;
+}
+
 function resolveRecentVideoTitle(item) {
   const entry = item && typeof item === "object" ? item : {};
   const rawTitle = String(entry.title || "").trim();
@@ -640,10 +892,27 @@ function readRecentDirectSearches() {
     const raw = window.localStorage.getItem(RECENT_DIRECT_KEY) || window.localStorage.getItem(RECENT_DIRECT_KEY_LEGACY);
     const arr = JSON.parse(raw || "[]");
     if (!Array.isArray(arr)) return [];
-    return arr
+    let changed = false;
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+    const next = arr
       .map((x) => normalizeRecentDirectEntry(x))
       .filter(Boolean)
+      .map((x) => {
+        const effectiveStatus = effectiveRecentSaveStatus(x, nowMs);
+        if (_saveStatus(x.save_status) !== effectiveStatus) {
+          changed = true;
+          return {
+            ...x,
+            save_status: effectiveStatus,
+            updated_at: nowIso,
+          };
+        }
+        return x;
+      })
       .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+    if (changed) writeRecentDirectSearches(next);
+    return next;
   } catch (_err) {
     return [];
   }
@@ -880,16 +1149,21 @@ function persistJuicePrefs() {
   setJuiceFiltersToggleLabel();
 }
 
-function directResultButtonsHtml({ url, videoLink, audioLink }) {
+function directResultButtonsHtml({ url, videoLink, audioLink, allowBuild = true }) {
   const safeUrl = String(url || "").trim();
   const safeVideo = String(videoLink || "").trim();
   const safeAudio = String(audioLink || "").trim();
+  const canBuild = allowBuild !== false;
   const vBtn = safeVideo
     ? `<a class="btn ghost direct-download-link" href="${escapeHtml(safeHref(safeVideo))}" target="_blank" rel="noreferrer" download data-url="${encodeURIComponent(safeUrl)}">${escapeHtml(t("btn.download_video"))}</a>`
-    : `<button class="btn ghost direct-build-link" type="button" data-kind="video" data-url="${encodeURIComponent(safeUrl)}">${escapeHtml(t("btn.download_video"))}</button>`;
+    : (canBuild
+      ? `<button class="btn ghost direct-build-link" type="button" data-kind="video" data-url="${encodeURIComponent(safeUrl)}">${escapeHtml(t("btn.download_video"))}</button>`
+      : "");
   const aBtn = safeAudio
     ? `<a class="btn ghost direct-download-link" href="${escapeHtml(safeHref(safeAudio))}" target="_blank" rel="noreferrer" download data-url="${encodeURIComponent(safeUrl)}">${escapeHtml(t("btn.download_audio"))}</a>`
-    : `<button class="btn ghost direct-build-link" type="button" data-kind="audio" data-url="${encodeURIComponent(safeUrl)}">${escapeHtml(t("btn.download_audio"))}</button>`;
+    : (canBuild
+      ? `<button class="btn ghost direct-build-link" type="button" data-kind="audio" data-url="${encodeURIComponent(safeUrl)}">${escapeHtml(t("btn.download_audio"))}</button>`
+      : "");
   return `
     ${vBtn}
     ${aBtn}
@@ -903,10 +1177,28 @@ function renderDirectPreview(url, title = "") {
   el.directPreview.innerHTML = "";
 }
 
-function directSaveProgressHtml(url) {
+function directSaveProgressHtml(url, entry = null) {
   const key = String(url || "").trim();
   if (!key) return "";
-  const row = state.directSaveProgress.get(key);
+  const liveRow = state.directSaveProgress.get(key);
+  const fallback = entry && typeof entry === "object" ? entry : {};
+  let row = liveRow;
+  if (!row || !String(row.status || "").trim()) {
+    const fallbackStatus = effectiveRecentSaveStatus(fallback);
+    if (fallbackStatus === "started" || fallbackStatus === "running") {
+      row = {
+        status: "running",
+        percent: 18,
+        message: "Server save in progress...",
+      };
+    } else if (fallbackStatus === "error") {
+      row = {
+        status: "error",
+        percent: 100,
+        message: "Save failed.",
+      };
+    }
+  }
   if (!row || !String(row.status || "").trim()) return "";
   const status = String(row.status || "").trim().toLowerCase();
   const percentRaw = Number(row.percent || 0);
@@ -934,21 +1226,25 @@ function setDirectSaveProgress(url, patch = {}) {
   renderRecentDirectSearches();
   const activeUrl = String((state.directResultContext || {}).url || "").trim();
   if (activeUrl && activeUrl === key) renderDirectResultCard(state.directResultContext);
+  renderSelectedJob();
 }
 
-function renderDirectResultCard(ctx) {
+function renderDirectResultCard(ctx, options = {}) {
   if (!el.directOutput) return;
   if (!ctx || typeof ctx !== "object") {
     el.directOutput.innerHTML = "";
     return;
   }
+  const allowBuild = Object.prototype.hasOwnProperty.call(options, "allowBuild")
+    ? options.allowBuild !== false
+    : (ctx.allowBuild !== false);
   const url = String(ctx.url || "").trim();
   const title = String(ctx.title || "").trim() || extractYouTubeVideoId(url) || "Video";
   const thumb = String(ctx.thumb || "").trim() || getVideoThumb(extractYouTubeVideoId(url));
   const videoLink = String(ctx.videoLink || "").trim();
   const audioLink = String(ctx.audioLink || "").trim();
   const recent = readRecentDirectSearches().find((x) => String(x.url || "").trim() === url) || {};
-  const savedUrl = String(recent.saved_video_url || "").trim();
+  const savedUrl = String(ctx.savedVideoUrl || recent.saved_video_url || "").trim();
 
   el.directOutput.innerHTML = `
     <article class="direct-result-card">
@@ -957,7 +1253,7 @@ function renderDirectResultCard(ctx) {
         <p class="title">${escapeHtml(title)}</p>
         ${savedUrl ? `<p class="meta-line"><a href="${escapeHtml(safeHref(savedUrl))}" target="_blank" rel="noreferrer" download>Saved video</a></p>` : ""}
         <div class="row direct-action-row">
-          ${directResultButtonsHtml({ url, videoLink, audioLink })}
+          ${directResultButtonsHtml({ url, videoLink, audioLink, allowBuild })}
           <a class="btn ghost" href="${escapeHtml(safeHref(url))}" target="_blank" rel="noreferrer">Open source</a>
         </div>
         ${directSaveProgressHtml(url)}
@@ -972,17 +1268,10 @@ function renderDirectResultCard(ctx) {
       try {
         setMeta(el.directMeta, `Preparing ${kind} link...`);
         await buildAndRememberDirectLink(rawUrl, kind);
-        maybeStartDirectServerSave(rawUrl);
         await runDirectPrepare();
       } catch (err) {
         setMeta(el.directMeta, String(err.message || err), true);
       }
-    });
-  });
-  el.directOutput.querySelectorAll(".direct-download-link").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const rawUrl = decodeURIComponent(btn.dataset.url || "");
-      maybeStartDirectServerSave(rawUrl);
     });
   });
 }
@@ -1016,6 +1305,7 @@ async function monitorDirectSaveProgress(url, videoId = "") {
           percent: 100,
           message: "Saved on server.",
         });
+        loadVideos(true).catch(() => {});
         return;
       }
     } catch (_err) {
@@ -1030,10 +1320,11 @@ async function monitorDirectSaveProgress(url, videoId = "") {
     await new Promise((resolve) => window.setTimeout(resolve, 2000));
   }
   setDirectSaveProgress(key, {
-    status: "running",
-    percent: 95,
-    message: "Still processing on server...",
+    status: "error",
+    percent: 100,
+    message: "Save status timed out. Refresh and retry if file is still missing.",
   });
+  patchRecentDirectSearch(key, { save_status: "error" });
 }
 
 async function buildAndRememberDirectLink(url, kind) {
@@ -1043,6 +1334,8 @@ async function buildAndRememberDirectLink(url, kind) {
   const directUrl = String(data.download_url || "").trim();
   const videoId = String(data.video_id || "").trim();
   const saveStarted = Boolean(data.save_started);
+  const saveStatusRaw = String(data.save_status || "").trim().toLowerCase();
+  const saveBusy = Boolean(data.save_busy) || saveStatusRaw === "busy";
   const savedVideoUrl = String(data.public_url || "").trim();
   const saveJobId = String(data.save_job_id || "").trim();
   const rawTitle = String(data.title || "").trim();
@@ -1059,7 +1352,7 @@ async function buildAndRememberDirectLink(url, kind) {
     video_id: videoId || extractYouTubeVideoId(url),
     thumbnail_url: thumb,
     download_url: directUrl,
-    save_status: saveStarted ? (savedVideoUrl ? "saved" : "started") : "",
+    save_status: savedVideoUrl ? "saved" : (saveStarted ? "started" : (saveStatusRaw || "")),
     saved_video_url: savedVideoUrl,
     save_job_id: saveJobId,
   });
@@ -1078,6 +1371,12 @@ async function buildAndRememberDirectLink(url, kind) {
       });
       monitorDirectSaveProgress(url, videoId || extractYouTubeVideoId(url)).catch(() => {});
     }
+  } else if (saveBusy) {
+    setDirectSaveProgress(url, {
+      status: "error",
+      percent: 100,
+      message: String(data.save_busy_message || "Another save is already running."),
+    });
   }
   return {
     download_url: directUrl,
@@ -1086,6 +1385,9 @@ async function buildAndRememberDirectLink(url, kind) {
     thumbnail_url: thumb,
     media_type: String(data.media_type || "").trim(),
     save_started: saveStarted,
+    save_status: saveStatusRaw,
+    save_busy: saveBusy,
+    save_busy_message: String(data.save_busy_message || ""),
     public_url: savedVideoUrl,
     save_job_id: saveJobId,
   };
@@ -1097,7 +1399,14 @@ function shouldStartDirectServerSave(url) {
   const recent = readRecentDirectSearches().find((x) => String(x.url || "").trim() === key) || {};
   if (String(recent.saved_video_url || "").trim()) return false;
 
-  const saveStatus = String(recent.save_status || "").trim().toLowerCase();
+  const runningElsewhere = Array.from(state.directSaveProgress.entries()).find(([savedUrl, row]) => {
+    const status = String((row || {}).status || "").trim().toLowerCase();
+    if (savedUrl === key) return false;
+    return status === "running" || status === "started";
+  });
+  if (runningElsewhere) return false;
+
+  const saveStatus = effectiveRecentSaveStatus(recent);
   if (saveStatus === "saved" || saveStatus === "started" || saveStatus === "running") return false;
 
   const progress = state.directSaveProgress.get(key) || {};
@@ -1107,16 +1416,20 @@ function shouldStartDirectServerSave(url) {
   return true;
 }
 
-function maybeStartDirectServerSave(url) {
-  const key = String(url || "").trim();
-  if (!shouldStartDirectServerSave(key)) return;
-  runSaveOnServer(key).catch(() => {});
-}
-
 async function runSaveOnServer(url) {
   const srcUrl = String(url || "").trim();
   if (!srcUrl) {
     setMeta(el.directMeta, "YouTube URL is required.", true);
+    return null;
+  }
+  const runningElsewhere = Array.from(state.directSaveProgress.entries()).find(([savedUrl, row]) => {
+    const status = String((row || {}).status || "").trim().toLowerCase();
+    if (savedUrl === srcUrl) return false;
+    return status === "running" || status === "started";
+  });
+  if (runningElsewhere) {
+    const activeUrl = String(runningElsewhere[0] || "").trim();
+    setMeta(el.directMeta, `Another save is already running. Finish it first: ${activeUrl}`, true);
     return null;
   }
   setDirectSaveProgress(srcUrl, {
@@ -1140,21 +1453,34 @@ async function runSaveOnServer(url) {
       videoId: resolvedVideoId,
       url: srcUrl,
     });
+    const status = String(data.status || "").trim().toLowerCase();
+    const busy = Boolean(data.busy) || status === "busy";
     const immediateSavedUrl = String(data.public_url || "").trim();
+    const isSaved = Boolean(immediateSavedUrl) || status === "already_saved";
+    const inProgress = status === "started" || status === "already_running";
     patchRecentDirectSearch(srcUrl, {
       video_id: resolvedVideoId,
       title: resolvedTitle,
       save_job_id: String(data.save_job_id || "").trim(),
-      save_status: immediateSavedUrl ? "saved" : "started",
+      save_status: isSaved ? "saved" : (busy ? "busy" : (inProgress ? "started" : String(status || "started"))),
       save_requested_at: new Date().toISOString(),
       saved_video_url: immediateSavedUrl,
     });
-    if (immediateSavedUrl) {
+    if (isSaved) {
       setDirectSaveProgress(srcUrl, {
         status: "done",
         percent: 100,
         message: "Saved on server.",
       });
+      setMeta(el.directMeta, `Already saved on server: ${resolvedTitle}.`);
+    } else if (busy) {
+      setDirectSaveProgress(srcUrl, {
+        status: "error",
+        percent: 100,
+        message: String(data.busy_message || "Another save is already running."),
+      });
+      setMeta(el.directMeta, String(data.busy_message || "Another save is already running. Please wait."), true);
+      return data;
     } else {
       setDirectSaveProgress(srcUrl, {
         status: "running",
@@ -1181,13 +1507,219 @@ async function runSaveOnServer(url) {
   }
 }
 
+function directServerActionButtonHtml(entry) {
+  const row = entry && typeof entry === "object" ? entry : {};
+  const srcUrl = String(row.url || "").trim();
+  if (!srcUrl) return "";
+  const savedUrl = resolvedSavedVideoUrl(row);
+  if (savedUrl) {
+    return `<a class="btn ghost" href="${escapeHtml(safeHref(savedUrl))}" target="_blank" rel="noreferrer" download>${escapeHtml(t("btn.download_from_server"))}</a>`;
+  }
+  const progress = state.directSaveProgress.get(srcUrl) || {};
+  const saveStatus = String(progress.status || "").trim().toLowerCase() || effectiveRecentSaveStatus(row);
+  if (saveStatus === "running" || saveStatus === "started") {
+    return `<button class="btn ghost" type="button" disabled>Saving...</button>`;
+  }
+  const runningElsewhere = Array.from(state.directSaveProgress.entries()).find(([savedUrlKey, rec]) => {
+    const status = String((rec || {}).status || "").trim().toLowerCase();
+    if (savedUrlKey === srcUrl) return false;
+    return status === "running" || status === "started";
+  });
+  if (runningElsewhere) {
+    return `<button class="btn ghost" type="button" disabled>Save Busy</button>`;
+  }
+  const label = saveStatus === "error" ? "Retry Save" : t("btn.download_to_server");
+  return `<button class="btn ghost direct-save-server-btn" type="button" data-url="${encodeURIComponent(srcUrl)}">${escapeHtml(label)}</button>`;
+}
+
+function ensureRecentDirectMonitor(entry) {
+  const row = entry && typeof entry === "object" ? entry : {};
+  const srcUrl = String(row.url || "").trim();
+  if (!srcUrl) return;
+  if (resolvedSavedVideoUrl(row)) return;
+  const saveStatus = effectiveRecentSaveStatus(row);
+  if (saveStatus !== "started" && saveStatus !== "running") return;
+  if (state.directSaveWatchers.has(srcUrl)) return;
+  state.directSaveWatchers.add(srcUrl);
+  monitorDirectSaveProgress(srcUrl, String(row.video_id || "").trim())
+    .catch(() => {})
+    .finally(() => {
+      state.directSaveWatchers.delete(srcUrl);
+    });
+}
+
+function isDirectVaultCandidate(video) {
+  const row = video && typeof video === "object" ? video : {};
+  const source = String(row.transcript_source || "").trim().toLowerCase();
+  const hasKnownSource = Boolean(source && source !== "unknown");
+  const hasSavedFile = Boolean(String(row.public_url || "").trim());
+  return hasKnownSource || hasSavedFile || Boolean(row.has_transcript);
+}
+
+function _directRecentKey(entry) {
+  const row = entry && typeof entry === "object" ? entry : {};
+  const rawUrl = String(row.url || "").trim();
+  const vid = String(row.video_id || "").trim() || extractYouTubeVideoId(rawUrl);
+  if (vid) return `vid:${vid}`;
+  return rawUrl ? `url:${rawUrl}` : "";
+}
+
+function _savedVideosRecentEntries() {
+  const out = [];
+  for (const row of (state.vaultVideos || [])) {
+    if (!isDirectVaultCandidate(row)) continue;
+    const videoId = String(row.video_id || "").trim();
+    const sourceUrl = String(row.source_url || "").trim();
+    const youtubeUrl = String(row.youtube_url || "").trim() || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : "");
+    const url = sourceUrl || youtubeUrl;
+    if (!url) continue;
+    const context = existingDirectContextFromVideo(row);
+    const resolvedVideoId = videoId || extractYouTubeVideoId(url);
+    const transcriptTs = Number(row.transcript_updated_at_epoch || 0);
+    const analysisTs = Number(row.analysis_saved_at_epoch || 0);
+    const bestTs = Math.max(
+      0,
+      Number.isFinite(transcriptTs) ? transcriptTs : 0,
+      Number.isFinite(analysisTs) ? analysisTs : 0
+    );
+    const updatedAt = bestTs > 0 ? new Date(bestTs * 1000).toISOString() : new Date().toISOString();
+    const savedVideoUrl = String(row.public_url || context.savedVideoUrl || "").trim();
+    const recent = normalizeRecentDirectEntry({
+      url,
+      video_id: resolvedVideoId,
+      title: preferredDirectTitle({
+        rawTitle: String(row.title || "").trim(),
+        knownTitle: String(context.title || "").trim(),
+        recentTitle: "",
+        videoId: resolvedVideoId,
+        url,
+      }),
+      thumbnail_url: String(row.thumbnail_url || context.thumb || getVideoThumb(resolvedVideoId)).trim(),
+      links: {
+        video: String(context.videoLink || "").trim(),
+        audio: String(context.audioLink || "").trim(),
+      },
+      saved_video_url: savedVideoUrl,
+      save_status: savedVideoUrl ? "saved" : "",
+      created_at: updatedAt,
+      updated_at: updatedAt,
+    });
+    if (recent) out.push(recent);
+  }
+  return out;
+}
+
+function _videoIdFromRecentLike(entry) {
+  const row = entry && typeof entry === "object" ? entry : {};
+  const direct = String(row.video_id || "").trim();
+  if (direct) return direct;
+  const u1 = String(row.url || "").trim();
+  if (u1) {
+    const x1 = extractYouTubeVideoId(u1);
+    if (x1) return x1;
+  }
+  const u2 = String(row.source_url || row.youtube_url || "").trim();
+  if (u2) {
+    const x2 = extractYouTubeVideoId(u2);
+    if (x2) return x2;
+  }
+  return "";
+}
+
+function _urlsMatchByVideo(urlA, urlB) {
+  const a = String(urlA || "").trim();
+  const b = String(urlB || "").trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const aVid = extractYouTubeVideoId(a);
+  const bVid = extractYouTubeVideoId(b);
+  return Boolean(aVid && bVid && aVid === bVid);
+}
+
+function findSavedVideoRowForRecent(entry) {
+  const row = entry && typeof entry === "object" ? entry : {};
+  const vid = _videoIdFromRecentLike(row);
+  const src = String(row.url || "").trim();
+  const videos = Array.isArray(state.videos) ? state.videos : [];
+  return (
+    videos.find((x) => {
+      const xVid = _videoIdFromRecentLike(x);
+      return Boolean(vid && xVid && vid === xVid);
+    })
+    || videos.find((x) => {
+      const xSrc = String(x.source_url || x.youtube_url || "").trim();
+      return Boolean(src && xSrc && _urlsMatchByVideo(xSrc, src));
+    })
+    || null
+  );
+}
+
+function resolvedSavedVideoUrl(entry) {
+  const row = entry && typeof entry === "object" ? entry : {};
+  const direct = String(row.saved_video_url || "").trim();
+  if (direct) return direct;
+  const savedRow = findSavedVideoRowForRecent(row);
+  return String((savedRow || {}).public_url || "").trim();
+}
+
+function mergedRecentDirectSearches() {
+  const localItems = readRecentDirectSearches();
+  const savedItems = _savedVideosRecentEntries();
+  const merged = new Map();
+
+  for (const row of savedItems) {
+    const key = _directRecentKey(row);
+    if (!key) continue;
+    merged.set(key, row);
+  }
+
+  for (const row of localItems) {
+    const key = _directRecentKey(row);
+    if (!key) continue;
+    const prev = merged.get(key) || {};
+    const prevLinks = prev.links && typeof prev.links === "object" ? prev.links : {};
+    const rowLinks = row.links && typeof row.links === "object" ? row.links : {};
+    const url = String(row.url || prev.url || "").trim();
+    const videoId = String(row.video_id || prev.video_id || extractYouTubeVideoId(url)).trim();
+    const savedVideoUrl = String(row.saved_video_url || prev.saved_video_url || "").trim();
+    const normalized = normalizeRecentDirectEntry({
+      ...prev,
+      ...row,
+      url,
+      video_id: videoId,
+      title: preferredDirectTitle({
+        rawTitle: String(row.title || "").trim(),
+        knownTitle: String(prev.title || "").trim(),
+        recentTitle: "",
+        videoId,
+        url,
+      }),
+      thumbnail_url: String(row.thumbnail_url || prev.thumbnail_url || getVideoThumb(videoId)).trim(),
+      links: {
+        video: String(rowLinks.video || prevLinks.video || "").trim(),
+        audio: String(rowLinks.audio || prevLinks.audio || "").trim(),
+      },
+      saved_video_url: savedVideoUrl,
+      save_status: _saveStatus(row.save_status || prev.save_status || (savedVideoUrl ? "saved" : "")),
+      created_at: String(row.created_at || prev.created_at || new Date().toISOString()),
+      updated_at: String(row.updated_at || prev.updated_at || new Date().toISOString()),
+    });
+    if (normalized) merged.set(key, normalized);
+  }
+
+  return Array.from(merged.values()).sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+}
+
 function renderRecentDirectSearches() {
   if (!el.directRecentList) return;
-  const items = readRecentDirectSearches();
+  const items = mergedRecentDirectSearches();
   el.directRecentList.innerHTML = items.length
     ? items
         .map(
-          (x) => `
+          (x) => {
+            const savedUrl = resolvedSavedVideoUrl(x);
+            const links = x.links && typeof x.links === "object" ? x.links : {};
+            return `
             <article class="direct-recent-card" data-url="${encodeURIComponent(String(x.url || ""))}">
               <img src="${escapeHtml(x.thumbnail_url || getVideoThumb(x.video_id || ""))}" alt="" loading="lazy" />
               <div class="body">
@@ -1195,21 +1727,24 @@ function renderRecentDirectSearches() {
                 <p class="meta-line mono">${escapeHtml(formatTime(x.updated_at || x.created_at))}</p>
                 <p class="meta-line"><a href="${escapeHtml(safeHref(x.url || "#"))}" target="_blank" rel="noreferrer">Open source</a></p>
                 ${
-                  x.saved_video_url
-                    ? `<p class="meta-line"><a href="${escapeHtml(safeHref(x.saved_video_url))}" target="_blank" rel="noreferrer" download>Saved video</a></p>`
+                  savedUrl
+                    ? `<p class="meta-line"><a href="${escapeHtml(safeHref(savedUrl))}" target="_blank" rel="noreferrer" download>Saved video</a></p>`
                     : ""
                 }
                 <div class="row direct-action-row">
+                  ${directServerActionButtonHtml({ ...x, saved_video_url: savedUrl })}
                   ${directResultButtonsHtml({
                     url: x.url,
-                    videoLink: x.links.video,
-                    audioLink: x.links.audio,
+                    videoLink: String(links.video || "").trim(),
+                    audioLink: String(links.audio || "").trim(),
+                    allowBuild: true,
                   })}
                 </div>
-                ${directSaveProgressHtml(x.url)}
+                ${directSaveProgressHtml(x.url, x)}
               </div>
             </article>
-          `
+          `;
+          }
         )
         .join("")
     : `<p class="meta">${escapeHtml(t("status.no_recent_searches"))}</p>`;
@@ -1224,36 +1759,38 @@ function renderRecentDirectSearches() {
   });
   el.directRecentList.querySelectorAll(".direct-build-link").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      const rawUrl = decodeURIComponent(btn.dataset.url || "");
+      const rawUrl = decodeURIComponent(String(btn.dataset.url || ""));
       const kind = String(btn.dataset.kind || "video");
-      if (el.directUrlInput) el.directUrlInput.value = rawUrl;
+      if (!rawUrl) return;
+      btn.disabled = true;
       try {
         setMeta(el.directMeta, `Preparing ${kind} link...`);
-        const built = await buildAndRememberDirectLink(rawUrl, kind);
+        await buildAndRememberDirectLink(rawUrl, kind);
         renderRecentDirectSearches();
-        if (kind === "video" || kind === "audio") {
-          const dl = String(built.download_url || "").trim();
-          if (dl) {
-            window.open(dl, "_blank", "noopener,noreferrer");
-          } else if (Boolean(built.save_started)) {
-            setMeta(el.directMeta, "Direct link blocked by YouTube. Server save started.");
-          }
-        }
-        maybeStartDirectServerSave(rawUrl);
-        if (!Boolean(built.save_started) || String(built.download_url || "").trim()) {
-          setMeta(el.directMeta, `${kind === "video" ? "Video" : "Audio"} download is ready.`);
-        }
       } catch (err) {
         setMeta(el.directMeta, String(err.message || err), true);
+      } finally {
+        btn.disabled = false;
       }
     });
   });
-  el.directRecentList.querySelectorAll(".direct-download-link").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const rawUrl = decodeURIComponent(btn.dataset.url || "");
-      maybeStartDirectServerSave(rawUrl);
+  el.directRecentList.querySelectorAll(".direct-save-server-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const rawUrl = decodeURIComponent(String(btn.dataset.url || ""));
+      if (!rawUrl) return;
+      if (!shouldStartDirectServerSave(rawUrl)) {
+        setMeta(el.directMeta, "Server save already in progress or already available.");
+        return;
+      }
+      btn.disabled = true;
+      try {
+        await runSaveOnServer(rawUrl);
+      } finally {
+        btn.disabled = false;
+      }
     });
   });
+  items.forEach((entry) => ensureRecentDirectMonitor(entry));
 }
 
 function makeListItem(item, active, line1, line2) {
@@ -1263,6 +1800,42 @@ function makeListItem(item, active, line1, line2) {
       <div class="line-2">${escapeHtml(line2)}</div>
     </button>
   `;
+}
+
+function findRecentDirectEntryForVideo(video) {
+  const row = video && typeof video === "object" ? video : {};
+  const items = readRecentDirectSearches();
+  const vid = String(row.video_id || "").trim();
+  const src = String(row.source_url || row.youtube_url || "").trim();
+  if (!items.length) return null;
+  return (
+    items.find((x) => String(x.video_id || "").trim() === vid)
+    || items.find((x) => String(x.url || "").trim() === src)
+    || items.find((x) => {
+      const xId = extractYouTubeVideoId(String(x.url || "").trim());
+      return Boolean(vid && xId && xId === vid);
+    })
+    || null
+  );
+}
+
+function existingDirectContextFromVideo(video) {
+  const row = video && typeof video === "object" ? video : {};
+  const recent = findRecentDirectEntryForVideo(row) || {};
+  const links = recent.links && typeof recent.links === "object" ? recent.links : {};
+  const url = String(row.source_url || row.youtube_url || recent.url || "").trim();
+  const videoFileUrl = String(row.public_url || recent.saved_video_url || "").trim();
+  const directVideoUrl = String(links.video || "").trim();
+  const audioUrl = String(links.audio || "").trim();
+  return {
+    url,
+    title: String(row.title || recent.title || row.video_id || "Video").trim(),
+    thumb: String(row.thumbnail_url || recent.thumbnail_url || getVideoThumb(row.video_id || "")).trim(),
+    videoLink: videoFileUrl || directVideoUrl,
+    audioLink: audioUrl,
+    savedVideoUrl: videoFileUrl,
+    allowBuild: false,
+  };
 }
 
 function formatTime(ts) {
@@ -1309,6 +1882,88 @@ function llmModeText(mode) {
   return "Unknown";
 }
 
+const FUN_STATUS_LINES = {
+  analyze: {
+    en: [
+      "Combobulating",
+      "Polishing",
+      "Packing",
+      "Brewing",
+      "Distilling",
+      "Filtering",
+      "Sifting",
+      "Mapping",
+      "Scanning",
+      "Indexing",
+      "Comparing",
+      "Refining",
+      "Finalizing",
+      "Synthesizing",
+    ],
+    uk: [
+      "Combobulating",
+      "Polishing",
+      "Packing",
+      "Brewing",
+      "Distilling",
+      "Filtering",
+      "Sifting",
+      "Mapping",
+      "Scanning",
+      "Indexing",
+      "Comparing",
+      "Refining",
+      "Finalizing",
+      "Synthesizing",
+    ],
+  },
+  brew: {
+    en: [
+      "Combobulating",
+      "Polishing",
+      "Packing",
+      "Brewing",
+      "Distilling",
+      "Filtering",
+      "Sifting",
+      "Mapping",
+      "Scanning",
+      "Indexing",
+      "Comparing",
+      "Refining",
+      "Finalizing",
+      "Synthesizing",
+    ],
+    uk: [
+      "Combobulating",
+      "Polishing",
+      "Packing",
+      "Brewing",
+      "Distilling",
+      "Filtering",
+      "Sifting",
+      "Mapping",
+      "Scanning",
+      "Indexing",
+      "Comparing",
+      "Refining",
+      "Finalizing",
+      "Synthesizing",
+    ],
+  },
+};
+
+function funStatusLine(kind, seed = 0) {
+  const bucket = FUN_STATUS_LINES[kind] || {};
+  const lang = _uiLang === "uk" ? "uk" : "en";
+  const list = Array.isArray(bucket[lang]) && bucket[lang].length
+    ? bucket[lang]
+    : (Array.isArray(bucket.en) ? bucket.en : []);
+  if (!list.length) return "";
+  const n = Math.max(0, Number.isFinite(Number(seed)) ? Math.trunc(Number(seed)) : 0);
+  return String(list[n % list.length] || "").trim();
+}
+
 function setButtonLoading(button, isLoading, loadingLabel) {
   if (!button) return;
   const baseLabel = String(button.dataset.baseLabel || button.textContent || "").trim();
@@ -1327,6 +1982,105 @@ function setButtonLoading(button, isLoading, loadingLabel) {
 function setSectionLoading(section, metaNode, isLoading) {
   if (section) section.classList.toggle("is-busy", Boolean(isLoading));
   if (metaNode) metaNode.classList.toggle("meta-loading", Boolean(isLoading));
+}
+
+function activeNotesTask() {
+  const localTask = String(state.notesBusyTask || "").trim().toLowerCase();
+  if (localTask) return localTask;
+  return String(state.notesRemoteTask || "").trim().toLowerCase();
+}
+
+function syncNotesActionButtons() {
+  const active = activeNotesTask();
+  const busy = active === "ask" || active === "analyze";
+  if (el.askBtn) el.askBtn.disabled = busy;
+  if (el.analyzeBtn) el.analyzeBtn.disabled = busy;
+}
+
+function tryStartNotesTask(task, metaNode) {
+  const wanted = String(task || "").trim().toLowerCase();
+  if (!wanted) return false;
+  const active = activeNotesTask();
+  if (active) {
+    if (active === wanted) {
+      const key = wanted === "ask" ? "status.ask_already_running" : "status.analysis_already_running";
+      setMeta(metaNode, t(key));
+    } else {
+      const key = active === "ask" ? "status.analysis_blocked_by_ask" : "status.ask_blocked_by_analysis";
+      setMeta(metaNode, t(key), true);
+    }
+    syncNotesActionButtons();
+    return false;
+  }
+  state.notesBusyTask = wanted;
+  state.notesRemoteTask = "";
+  syncNotesActionButtons();
+  return true;
+}
+
+function finishNotesTask(task) {
+  const wanted = String(task || "").trim().toLowerCase();
+  if (String(state.notesBusyTask || "").trim().toLowerCase() === wanted) {
+    state.notesBusyTask = "";
+  }
+  syncNotesActionButtons();
+}
+
+function _isTaskRunningStatus(rawStatus) {
+  const status = String(rawStatus || "").trim().toLowerCase();
+  return status === "running" || status === "started" || status === "queued";
+}
+
+function applyServerNotesProgress(videoId, raw) {
+  const selected = String(state.selectedVideoId || "").trim();
+  const target = String(videoId || "").trim();
+  if (!selected || !target || selected !== target) return;
+
+  const payload = raw && typeof raw === "object" ? raw : {};
+  const ask = payload.ask && typeof payload.ask === "object" ? payload.ask : {};
+  const analyze = payload.analyze && typeof payload.analyze === "object" ? payload.analyze : {};
+  const askRunning = Boolean(ask.in_progress) || _isTaskRunningStatus(ask.status);
+  const analyzeRunning = Boolean(analyze.in_progress) || _isTaskRunningStatus(analyze.status);
+  const prevRemote = String(state.notesRemoteTask || "").trim().toLowerCase();
+  state.notesRemoteTask = askRunning ? "ask" : (analyzeRunning ? "analyze" : "");
+  syncNotesActionButtons();
+
+  if (state.notesBusyTask) return;
+
+  if (askRunning) {
+    const elapsed = Math.max(0, Math.round(Number(ask.elapsed_sec || 0)));
+    const msg = String(ask.message || t("status.asking_transcript")).trim() || t("status.asking_transcript");
+    setSectionLoading(el.askSection, el.qaMeta, true);
+    setButtonLoading(el.askBtn, true, `${t("btn.ask")}...`);
+    setMeta(el.qaMeta, elapsed > 0 ? `${msg} ${elapsed}s` : msg);
+  } else if (prevRemote === "ask") {
+    setSectionLoading(el.askSection, el.qaMeta, false);
+    setButtonLoading(el.askBtn, false);
+    if (!String(el.qaOutput?.textContent || "").trim()) setMeta(el.qaMeta, "");
+  }
+
+  if (analyzeRunning) {
+    const elapsed = Math.max(0, Math.round(Number(analyze.elapsed_sec || 0)));
+    const total = Math.max(0, Math.trunc(Number(analyze.chunk_total || 0)));
+    const done = Math.max(0, Math.trunc(Number(analyze.chunk_completed || 0)));
+    const msg = String(analyze.message || t("status.running_analysis")).trim() || t("status.running_analysis");
+    const parts = total > 0 ? ` | parts ${Math.min(done, total)}/${total}` : "";
+    const elapsedTxt = elapsed > 0 ? ` ${elapsed}s` : "";
+    setSectionLoading(el.analyzeSection, el.analysisMeta, true);
+    setButtonLoading(el.analyzeBtn, true, `${t("btn.run_analysis")}...`);
+    setMeta(el.analysisMeta, `${msg}${elapsedTxt}${parts}`);
+  } else if (prevRemote === "analyze") {
+    setSectionLoading(el.analyzeSection, el.analysisMeta, false);
+    setButtonLoading(el.analyzeBtn, false);
+    const hasAnalysis = Boolean(String(el.analysisOutput?.textContent || "").trim());
+    setMeta(el.analysisMeta, hasAnalysis ? t("status.loaded_saved_analysis") : t("status.no_analysis_saved"));
+  }
+}
+
+function rotatingFunStatus(kind, startedAt, offset = 0, stepMs = 1200) {
+  const base = Math.max(250, Number.isFinite(Number(stepMs)) ? Math.trunc(Number(stepMs)) : 1200);
+  const seed = Math.max(0, Math.floor((Date.now() - Number(startedAt || Date.now())) / base)) + Math.max(0, Number(offset || 0));
+  return funStatusLine(kind, seed);
 }
 
 function extractLlmDetailFromText(rawText) {
@@ -1376,7 +2130,10 @@ function brewStageLabel(job) {
     5: "Comparing and finalizing",
   };
   const etype = String((job || {}).last_event_type || "").trim().toLowerCase();
-  if (etype === "queries_ready" || etype === "candidates_ready") return "Searching videos";
+  if (etype === "queries_ready") return "Generating queries";
+  if (etype === "search_query_started" || etype === "search_query_processed" || etype === "candidates_ready") {
+    return "Searching videos";
+  }
   if (etype === "processing_video") return "Downloading transcript";
   if (etype === "video_processed") return "Analyzing transcript";
   if (etype === "comparing") return "Comparing transcripts";
@@ -1549,6 +2306,7 @@ function renderLiveLists(archiveItems) {
 function renderVideoLists() {
   const vq = (el.vaultSearchInput?.value || "").trim().toLowerCase();
   const vault = state.vaultVideos.filter((v) => {
+    if (!isDirectVaultCandidate(v)) return false;
     if (!vq) return true;
     return `${v.title || ""} ${v.video_id || ""}`.toLowerCase().includes(vq);
   });
@@ -1556,14 +2314,18 @@ function renderVideoLists() {
   if (el.videoList) {
     el.videoList.innerHTML = vault.length
       ? vault
-          .map((v) =>
-            makeListItem(
+          .map((v) => {
+            const rawSource = String(v.transcript_source || "").trim();
+            const sourceLabel = rawSource && rawSource.toLowerCase() !== "unknown"
+              ? rawSource
+              : (String(v.public_url || "").trim() ? "saved file" : "no transcript");
+            return makeListItem(
               v.video_id,
               state.selectedVideoId === v.video_id,
               v.title || v.video_id,
-              `${v.video_id} | ${v.transcript_source || "unknown"}`
-            )
-          )
+              `${v.video_id} | ${sourceLabel}`
+            );
+          })
           .join("")
       : `<p class="meta">${escapeHtml(t("status.no_saved_videos"))}</p>`;
 
@@ -1573,17 +2335,20 @@ function renderVideoLists() {
         if (!videoId) return;
         const clickedFromDirect = state.page === "direct";
         if (clickedFromDirect) {
-          try {
-            await loadVideos(true);
-          } catch (_err) {
-            // keep using currently loaded list if refresh fails
-          }
           const picked = state.videos.find((v) => String(v.video_id || "").trim() === videoId) || {};
-          const url = String(picked.youtube_url || picked.source_url || "").trim();
-          if (url && el.directUrlInput) {
-            el.directUrlInput.value = url;
-            await runDirectPrepare();
-          }
+          const existing = existingDirectContextFromVideo(picked);
+          if (existing.url && el.directUrlInput) el.directUrlInput.value = existing.url;
+          state.directResultContext = existing;
+          renderDirectPreview(existing.url, existing.title);
+          renderDirectResultCard(existing, { allowBuild: false });
+          const hasAnyLink = Boolean(String(existing.videoLink || "").trim() || String(existing.audioLink || "").trim());
+          setMeta(
+            el.directMeta,
+            hasAnyLink
+              ? "Showing existing saved/download links only."
+              : "No saved video/audio links for this item."
+          );
+          return;
         }
         await selectVideo(videoId);
         switchPage("transcript");
@@ -1610,14 +2375,23 @@ function renderNotesVideoList() {
 
   el.notesVideoList.innerHTML = filtered.length
     ? filtered
-        .map((v) =>
-          makeListItem(
-            v.video_id,
-            state.selectedVideoId === v.video_id,
-            v.title || v.video_id,
-            `transcript saved | ${formatTime(v.transcript_updated_at_epoch ? new Date(Number(v.transcript_updated_at_epoch) * 1000).toISOString() : "")}`
-          )
-        )
+        .map((v) => {
+          const thumb = String(v.thumbnail_url || "").trim() || getVideoThumb(v.video_id || "");
+          const updatedAt = formatTime(
+            v.transcript_updated_at_epoch
+              ? new Date(Number(v.transcript_updated_at_epoch) * 1000).toISOString()
+              : ""
+          );
+          return `
+            <button class="item notes-list-item${state.selectedVideoId === v.video_id ? " active" : ""}" data-id="${escapeHtml(v.video_id)}">
+              ${thumb ? `<img class="notes-list-item-thumb" src="${escapeHtml(thumb)}" alt="" loading="lazy" />` : `<div class="notes-list-item-thumb" aria-hidden="true"></div>`}
+              <div class="notes-list-item-body">
+                <div class="line-1">${escapeHtml(v.title || v.video_id)}</div>
+                <div class="line-2">${escapeHtml(`transcript saved | ${updatedAt}`)}</div>
+              </div>
+            </button>
+          `;
+        })
         .join("")
     : `<p class="meta">${escapeHtml(t("status.no_transcripts"))}</p>`;
 
@@ -1630,6 +2404,8 @@ function renderNotesVideoList() {
 
 function clearSelectedVideoDetail() {
   state.selectedVideoId = "";
+  state.notesRemoteTask = "";
+  writeUiPrefs();
   if (el.videoTitle) el.videoTitle.textContent = t("status.select_video_from_list");
   if (el.videoFacts) el.videoFacts.textContent = t("status.no_video_selected");
   if (el.videoLink) {
@@ -1648,17 +2424,22 @@ function clearSelectedVideoDetail() {
   if (el.qaOutput) el.qaOutput.hidden = true;
   if (el.askSection) el.askSection.hidden = true;
   if (el.analyzeSection) el.analyzeSection.hidden = true;
+  setSectionLoading(el.askSection, el.qaMeta, false);
+  setSectionLoading(el.analyzeSection, el.analysisMeta, false);
+  setButtonLoading(el.askBtn, false);
+  setButtonLoading(el.analyzeBtn, false);
   setMeta(el.analysisMeta, "");
   setMeta(el.qaMeta, "");
+  syncNotesActionButtons();
 }
 
 async function loadVideos(keepSelected = true) {
   const data = await apiGet("/api/videos");
   state.videos = data.items || [];
-  const recentSavedSynced = syncRecentSavedLinksFromVideos();
+  syncRecentSavedLinksFromVideos();
   state.vaultVideos = state.videos.filter((v) => !v.is_archive);
   state.archiveVideos = state.videos.filter((v) => Boolean(v.is_archive));
-  if (recentSavedSynced) renderRecentDirectSearches();
+  renderRecentDirectSearches();
   if (!keepSelected || !state.videos.some((x) => x.video_id === state.selectedVideoId)) state.selectedVideoId = "";
   renderVideoLists();
   if (state.selectedVideoId) {
@@ -1674,6 +2455,7 @@ async function loadVideoDetail(videoId) {
   const data = await apiGet(`/api/video?video_id=${encodeURIComponent(videoId)}`);
   const item = data.item || {};
   state.selectedVideoId = item.video_id || videoId;
+  writeUiPrefs();
   const currentVideoId = String(state.selectedVideoId || "");
   const isSameSelectedVideo = previousVideoId && previousVideoId === currentVideoId;
   const candidateTitle = String(item.title || "").trim();
@@ -1709,12 +2491,16 @@ async function loadVideoDetail(videoId) {
   const hasTranscript = Boolean(item.transcript_exists);
   if (el.askSection) el.askSection.hidden = !hasTranscript;
   if (el.analyzeSection) el.analyzeSection.hidden = !hasTranscript;
-  if (!isSameSelectedVideo) {
+  const analyzeIsBusy = Boolean(el.analyzeSection?.classList.contains("is-busy"));
+  if (!analyzeIsBusy) {
     setMeta(el.analysisMeta, item.analysis_text ? t("status.loaded_saved_analysis") : t("status.no_analysis_saved"));
+  }
+  if (!isSameSelectedVideo) {
     setMeta(el.qaMeta, "");
     el.qaOutput.textContent = "";
     el.qaOutput.hidden = true;
   }
+  applyServerNotesProgress(currentVideoId, item.notes_progress || {});
   renderVideoLists();
 }
 
@@ -1727,13 +2513,263 @@ async function autoAnalyzeIfTranscript(videoId) {
   if (!vid) return;
   const row = state.videos.find((v) => String(v.video_id || "").trim() === vid);
   if (!row || !Boolean(row.has_transcript)) return;
-  const prevForce = Boolean(el.forceAnalyze?.checked);
-  if (el.forceAnalyze) el.forceAnalyze.checked = false;
-  try {
-    await runAnalyze();
-  } finally {
-    if (el.forceAnalyze) el.forceAnalyze.checked = prevForce;
+  await runAnalyze();
+}
+
+async function ensureSelectedTranscriptText() {
+  let txt = String(el.transcriptOutput?.textContent || "").trim();
+  if (txt) return txt;
+  if (state.selectedVideoId) {
+    await loadVideoDetail(state.selectedVideoId);
+    txt = String(el.transcriptOutput?.textContent || "").trim();
   }
+  return txt;
+}
+
+function _tokenizeForScoring(text) {
+  return String(text || "")
+    .toLowerCase()
+    .match(/[a-zA-Z0-9]{3,}/g) || [];
+}
+
+function buildBrowserQaContext(transcript, question, maxChars = 12000) {
+  const source = String(transcript || "").trim();
+  if (!source) return "";
+  const blocks = source.split(/\n{2,}/).map((x) => String(x || "").trim()).filter(Boolean);
+  if (!blocks.length) return source.slice(0, maxChars);
+  const qTokens = Array.from(new Set(_tokenizeForScoring(question))).slice(0, 22);
+  const scored = blocks.map((block, idx) => {
+    const low = block.toLowerCase();
+    let score = 0;
+    for (const token of qTokens) {
+      if (low.includes(token)) score += 1 + Math.min(2, low.split(token).length - 1);
+    }
+    return { idx, score, block };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  const picked = new Set(scored.slice(0, 8).map((x) => x.idx));
+  for (const idx of Array.from(picked)) {
+    if (idx - 1 >= 0) picked.add(idx - 1);
+    if (idx + 1 < blocks.length) picked.add(idx + 1);
+  }
+  let out = "";
+  for (const idx of Array.from(picked).sort((a, b) => a - b)) {
+    const part = blocks[idx];
+    if (!part) continue;
+    if ((out.length + part.length + 2) > maxChars && out) break;
+    out += `${out ? "\n\n" : ""}${part}`;
+  }
+  return (out || source.slice(0, maxChars)).slice(0, maxChars);
+}
+
+function answerLooksLikeNoEvidence(text) {
+  const low = String(text || "").trim().toLowerCase();
+  if (!low) return true;
+  const markers = [
+    "does not contain enough evidence",
+    "not contain enough evidence",
+    "not enough evidence",
+    "insufficient evidence",
+    "cannot determine from the transcript",
+    "cannot answer from the transcript",
+    "transcript does not provide enough",
+    "not provided in the transcript",
+    "not mentioned in the transcript",
+  ];
+  return markers.some((m) => low.includes(m));
+}
+
+function _splitTranscriptSegmentsForQa(transcript) {
+  const src = String(transcript || "").replace(/\r/g, "\n").trim();
+  if (!src) return [];
+  const lines = src.split(/\n+/).map((x) => String(x || "").trim()).filter(Boolean);
+  if (!lines.length) return [];
+  const out = [];
+  let cur = "";
+  for (const line of lines) {
+    if (/^\[\d{1,2}:\d{2}\]/.test(line) && cur) {
+      out.push(cur.trim());
+      cur = line;
+      continue;
+    }
+    cur = cur ? `${cur} ${line}` : line;
+  }
+  if (cur) out.push(cur.trim());
+  return out;
+}
+
+function buildBrowserQaEvidenceContext(transcript, question, maxChars = 9000) {
+  const source = String(transcript || "").trim();
+  if (!source) return "";
+  const segments = _splitTranscriptSegmentsForQa(source);
+  const blocks = segments.length ? segments : source.split(/\n{2,}/).map((x) => String(x || "").trim()).filter(Boolean);
+  if (!blocks.length) return source.slice(0, maxChars);
+
+  const qTokens = Array.from(new Set(_tokenizeForScoring(question))).slice(0, 30);
+  const coreTokens = [
+    "salesperson",
+    "authority",
+    "manager",
+    "pricing",
+    "payment",
+    "negotiat",
+    "closer",
+    "proposal",
+    "deal",
+  ];
+  const tokens = Array.from(new Set([...qTokens, ...coreTokens]));
+
+  const scored = blocks.map((block, idx) => {
+    const low = block.toLowerCase();
+    let score = 0;
+    for (const token of tokens) {
+      if (!token || token.length < 3) continue;
+      const hits = low.split(token).length - 1;
+      if (hits > 0) score += 1 + Math.min(4, hits);
+    }
+    return { idx, score, block };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  const picked = scored.filter((x) => x.score > 0).slice(0, 10).map((x) => x.idx);
+  const base = picked.length ? picked : scored.slice(0, 6).map((x) => x.idx);
+  const expanded = new Set(base);
+  for (const idx of base) {
+    if (idx - 1 >= 0) expanded.add(idx - 1);
+    if (idx + 1 < blocks.length) expanded.add(idx + 1);
+  }
+
+  let out = "";
+  for (const idx of Array.from(expanded).sort((a, b) => a - b)) {
+    const part = blocks[idx];
+    if (!part) continue;
+    if ((out.length + part.length + 2) > maxChars && out) break;
+    out += `${out ? "\n\n" : ""}${part}`;
+  }
+  return (out || source.slice(0, maxChars)).slice(0, maxChars);
+}
+
+function splitTextWindowsLocal(text, windowChars = 7000, overlapChars = 320, maxWindows = 4) {
+  const src = String(text || "").trim();
+  if (!src) return [];
+  const out = [];
+  const win = Math.max(1800, Number(windowChars || 0));
+  const overlap = Math.max(0, Math.min(Number(overlapChars || 0), Math.floor(win / 3)));
+  let start = 0;
+  while (start < src.length && out.length < Math.max(1, Number(maxWindows || 1))) {
+    let end = Math.min(src.length, start + win);
+    if (end < src.length) {
+      const cut = src.lastIndexOf("\n", end);
+      if (cut > start + Math.floor(win * 0.55)) end = cut;
+    }
+    const chunk = src.slice(start, end).trim();
+    if (chunk) out.push(chunk);
+    if (end >= src.length) break;
+    start = Math.max(end - overlap, start + 1);
+  }
+  return out;
+}
+
+function browserLlmDetail() {
+  const provider = String(browserLlmRuntime.provider || "browser").trim();
+  const model = String(browserLlmRuntime.model || "unknown").trim();
+  return `${provider}:${model}`;
+}
+
+async function _runWindowAiPrompt(session, systemPrompt, userPrompt) {
+  const prompt = `${String(systemPrompt || "").trim()}\n\n${String(userPrompt || "").trim()}`.trim();
+  if (session && typeof session.prompt === "function") {
+    const out = await session.prompt(prompt);
+    if (typeof out === "string") return out.trim();
+    if (out && typeof out === "object") {
+      return String(out.text || out.output || out.content || "").trim();
+    }
+  }
+  if (session && typeof session.complete === "function") {
+    const out = await session.complete(prompt);
+    if (typeof out === "string") return out.trim();
+    if (out && typeof out === "object") {
+      return String(out.text || out.output || out.content || "").trim();
+    }
+  }
+  throw new Error("Browser AI prompt API is unavailable.");
+}
+
+async function _runWebLlmPrompt(engine, systemPrompt, userPrompt) {
+  const resp = await engine.chat.completions.create({
+    messages: [
+      { role: "system", content: String(systemPrompt || "") },
+      { role: "user", content: String(userPrompt || "") },
+    ],
+    temperature: 0.2,
+  });
+  const choice = Array.isArray(resp?.choices) ? resp.choices[0] : null;
+  let content = choice?.message?.content;
+  if (Array.isArray(content)) {
+    content = content.map((x) => (typeof x === "string" ? x : String(x?.text || ""))).join("");
+  }
+  return String(content || "").trim();
+}
+
+async function ensureBrowserLlm(onStatus) {
+  if (browserLlmRuntime.session || browserLlmRuntime.engine) return browserLlmRuntime;
+  if (browserLlmRuntime.loading) return browserLlmRuntime.loading;
+  const report = typeof onStatus === "function" ? onStatus : (() => {});
+  browserLlmRuntime.loading = (async () => {
+    const aiApi = window.ai && window.ai.languageModel;
+    if (aiApi && typeof aiApi.create === "function") {
+      report(t("status.browser_loading_model"));
+      const session = await aiApi.create();
+      browserLlmRuntime.provider = "window.ai";
+      browserLlmRuntime.model = "languageModel";
+      browserLlmRuntime.session = session;
+      report(t("status.browser_model_ready"));
+      return browserLlmRuntime;
+    }
+
+    if (!navigator.gpu) {
+      throw new Error("Browser acceleration unavailable: WebGPU is not supported.");
+    }
+    report(t("status.browser_loading_model"));
+    const webllm = await import(BROWSER_WEBLLM_IMPORT);
+    const engine = new webllm.MLCEngine();
+    let loadedModel = "";
+    let lastErr = "";
+    for (const model of BROWSER_WEBLLM_MODELS) {
+      try {
+        await engine.reload(model, {
+          initProgressCallback: (p) => {
+            const ratio = Number(p?.progress || 0);
+            const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+            report(`${t("status.browser_loading_model")} ${pct}%`);
+          },
+        });
+        loadedModel = model;
+        break;
+      } catch (err) {
+        lastErr = String(err?.message || err || "");
+      }
+    }
+    if (!loadedModel) {
+      throw new Error(lastErr || "Could not load browser model.");
+    }
+    browserLlmRuntime.provider = "webllm";
+    browserLlmRuntime.model = loadedModel;
+    browserLlmRuntime.engine = engine;
+    report(t("status.browser_model_ready"));
+    return browserLlmRuntime;
+  })()
+    .finally(() => {
+      browserLlmRuntime.loading = null;
+    });
+  return browserLlmRuntime.loading;
+}
+
+async function runBrowserChat(systemPrompt, userPrompt, onStatus) {
+  const rt = await ensureBrowserLlm(onStatus);
+  if (rt.session) return _runWindowAiPrompt(rt.session, systemPrompt, userPrompt);
+  if (rt.engine) return _runWebLlmPrompt(rt.engine, systemPrompt, userPrompt);
+  throw new Error("Browser model is not initialized.");
 }
 
 async function runAnalyze(opts = {}) {
@@ -1741,28 +2777,186 @@ async function runAnalyze(opts = {}) {
     setMeta(el.analysisMeta, t("status.select_video_first"), true);
     return;
   }
+  if (!tryStartNotesTask("analyze", el.analysisMeta)) return;
+  const videoId = String(state.selectedVideoId || "").trim();
+  if (!videoId) {
+    finishNotesTask("analyze");
+    setMeta(el.analysisMeta, t("status.select_video_first"), true);
+    return;
+  }
   const save = Object.prototype.hasOwnProperty.call(opts, "save") ? Boolean(opts.save) : true;
+  const mode = currentAnalyzeMode();
+  if (mode === "browser") {
+    const startedAtBrowser = Date.now();
+    setSectionLoading(el.analyzeSection, el.analysisMeta, true);
+    setButtonLoading(el.analyzeBtn, true, `${t("btn.run_analysis")}...`);
+    el.analyzeBtn.disabled = true;
+    try {
+      const transcript = await ensureSelectedTranscriptText();
+      if (!transcript) {
+        throw new Error("Transcript is required for browser analysis.");
+      }
+      const title = String(el.videoTitle?.textContent || state.selectedVideoId || "Video").trim();
+      const trimmed = transcript.slice(0, 22000);
+      const chunks = splitTextWindowsLocal(trimmed, 6500, 280, 4);
+      if (!chunks.length) throw new Error("Transcript is empty.");
+
+      await ensureBrowserLlm((msg) => {
+        const elapsed = Math.max(1, Math.round((Date.now() - startedAtBrowser) / 1000));
+        const fun = rotatingFunStatus("analyze", startedAtBrowser, 1, 1000);
+        setMeta(el.analysisMeta, `${msg}\n${fun}`);
+      });
+
+      const notes = [];
+      for (let i = 0; i < chunks.length; i += 1) {
+        const idx = i + 1;
+        const elapsed = Math.max(1, Math.round((Date.now() - startedAtBrowser) / 1000));
+        const fun = rotatingFunStatus("analyze", startedAtBrowser, i + 2, 1000);
+        setMeta(el.analysisMeta, `${t("status.running_analysis")} ${elapsed}s | parts ${idx}/${chunks.length}\n${fun}`);
+        const part = await runBrowserChat(
+          "Analyze this transcript chunk. Return concise notes: idea, key points, practical actions, risks.",
+          `Title: ${title}\nChunk ${idx}/${chunks.length}\n\n${chunks[i]}`,
+          null
+        );
+        const clean = String(part || "").trim();
+        if (clean) notes.push(clean);
+      }
+      if (!notes.length) throw new Error("Browser model returned empty analysis.");
+
+      let finalBody = notes.length === 1 ? notes[0] : "";
+      if (notes.length > 1) {
+        finalBody = await runBrowserChat(
+          "Merge chunk notes into one coherent analysis with sections: Idea, Key Points, Actions, Risks.",
+          notes.map((x, i) => `Part ${i + 1}/${notes.length}\n${x}`).join("\n\n"),
+          null
+        );
+      }
+      finalBody = String(finalBody || "").trim() || notes.join("\n\n");
+      const llmDetail = browserLlmDetail();
+      const analysisText = `🧠 Browser Analysis\n🖥️ Backend: browser (${llmDetail})\n\n${finalBody}`;
+      el.analysisOutput.textContent = analysisText;
+
+      let savedNotePath = "";
+      if (save) {
+        try {
+          const store = await apiPost("/api/analyze_store", {
+            video_id: videoId,
+            analysis: analysisText,
+            llm_backend: "browser",
+            llm_backend_detail: llmDetail,
+          });
+          savedNotePath = String(store.analysis_md_path || "").trim();
+          await loadVideos(true);
+        } catch (_err) {
+          // keep browser result visible even if persistence fails
+        }
+      }
+      const elapsed = Math.max(1, Math.round((Date.now() - startedAtBrowser) / 1000));
+      const saveMeta = save ? (savedNotePath ? " | saved" : " | not saved") : " | not saved";
+      setMeta(el.analysisMeta, `Done in ${elapsed}s | mode=browser | llm=${llmDetail}${saveMeta}`);
+    } catch (err) {
+      setMeta(el.analysisMeta, String(err.message || err), true);
+    } finally {
+      el.analyzeBtn.disabled = false;
+      setButtonLoading(el.analyzeBtn, false);
+      setSectionLoading(el.analyzeSection, el.analysisMeta, false);
+      finishNotesTask("analyze");
+    }
+    return;
+  }
+  const startedAt = Date.now();
+  let analysisTimer = null;
+  let pollInFlight = false;
+  let progressItem = null;
+  let handoffProgress = null;
+
+  const summarizeProgress = () => {
+    const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    const snap = progressItem && typeof progressItem === "object" ? progressItem : {};
+    const totalRaw = Number(snap.chunk_total || 0);
+    const doneRaw = Number(snap.chunk_completed || 0);
+    const total = Number.isFinite(totalRaw) ? Math.max(0, Math.trunc(totalRaw)) : 0;
+    const done = Number.isFinite(doneRaw) ? Math.max(0, Math.trunc(doneRaw)) : 0;
+    const charsRaw = Number(snap.generated_chars || 0);
+    const chars = Number.isFinite(charsRaw) ? Math.max(0, Math.trunc(charsRaw)) : 0;
+    const statusMsg = String(snap.message || "").trim();
+    let tail = "";
+    if (total > 0) tail += ` | parts ${Math.min(done, total)}/${total}`;
+    if (chars > 0) tail += ` | ${chars} chars`;
+    if (!tail && statusMsg) tail += ` | ${statusMsg}`;
+    const fun = rotatingFunStatus("analyze", startedAt, 0, 1000);
+    const funLine = fun ? `\n${fun}` : "";
+    setMeta(el.analysisMeta, `${t("status.running_analysis")} ${elapsed}s${tail}${funLine}`);
+  };
+
+  const pollProgress = async () => {
+    if (pollInFlight) return;
+    pollInFlight = true;
+    try {
+      const payload = await apiGet(`/api/analyze_progress?video_id=${encodeURIComponent(videoId)}`);
+      const item = payload && typeof payload.item === "object" ? payload.item : null;
+      if (item) progressItem = item;
+    } catch (_err) {
+      // Ignore polling errors while the main analyze request is running.
+    } finally {
+      pollInFlight = false;
+    }
+  };
+
   setSectionLoading(el.analyzeSection, el.analysisMeta, true);
   setButtonLoading(el.analyzeBtn, true, `${t("btn.run_analysis")}...`);
   el.analyzeBtn.disabled = true;
-  setMeta(el.analysisMeta, t("status.running_analysis"));
+  setMeta(el.analysisMeta, `${t("status.running_analysis")}\n${rotatingFunStatus("analyze", startedAt, 0, 1000)}`);
+  void pollProgress();
+  analysisTimer = window.setInterval(() => {
+    summarizeProgress();
+    void pollProgress();
+  }, 1200);
   try {
     const data = await apiPost("/api/analyze", {
-      video_id: state.selectedVideoId,
-      force: Boolean(el.forceAnalyze.checked),
+      video_id: videoId,
       save,
     });
+    if (String(data.status || "").trim().toLowerCase() === "already_running" || Boolean(data.in_progress)) {
+      handoffProgress = {
+        busy_task: "analyze",
+        analyze: {
+          ...(data.item && typeof data.item === "object" ? data.item : {}),
+          status: "running",
+          in_progress: true,
+        },
+      };
+      setMeta(el.analysisMeta, String((data.item || {}).message || t("status.analysis_already_running")));
+      return;
+    }
+    await pollProgress();
     el.analysisOutput.textContent = data.analysis || "";
     const mode = data.cached ? `cache (${data.cache_age_sec}s old)` : "fresh";
     const llm = llmDetailText(data.llm_backend_detail, data.llm_backend, data.analysis || "");
-    setMeta(el.analysisMeta, `Done in ${data.elapsed_sec}s | ${mode} | lang=${data.lang} | llm=${llm}`);
+    const finalTotalRaw = Number(
+      data.chunk_total
+      || ((progressItem && typeof progressItem === "object") ? progressItem.chunk_total : 0)
+      || 0
+    );
+    const finalDoneRaw = Number(
+      data.chunk_completed
+      || ((progressItem && typeof progressItem === "object") ? progressItem.chunk_completed : 0)
+      || 0
+    );
+    const finalTotal = Number.isFinite(finalTotalRaw) ? Math.max(0, Math.trunc(finalTotalRaw)) : 0;
+    const finalDone = Number.isFinite(finalDoneRaw) ? Math.max(0, Math.trunc(finalDoneRaw)) : 0;
+    const partsMeta = finalTotal > 0 ? ` | parts ${Math.min(finalDone, finalTotal)}/${finalTotal}` : "";
+    setMeta(el.analysisMeta, `Done in ${data.elapsed_sec}s | ${mode} | lang=${data.lang} | llm=${llm}${partsMeta}`);
     await loadVideos(true);
   } catch (err) {
     setMeta(el.analysisMeta, String(err.message || err), true);
   } finally {
+    if (analysisTimer) window.clearInterval(analysisTimer);
     el.analyzeBtn.disabled = false;
     setButtonLoading(el.analyzeBtn, false);
     setSectionLoading(el.analyzeSection, el.analysisMeta, false);
+    finishNotesTask("analyze");
+    if (handoffProgress) applyServerNotesProgress(videoId, handoffProgress);
   }
 }
 
@@ -1772,31 +2966,122 @@ async function runAsk(ev) {
     setMeta(el.qaMeta, t("status.select_video_first"), true);
     return;
   }
+  if (!tryStartNotesTask("ask", el.qaMeta)) return;
   const question = (el.questionInput.value || "").trim();
   if (!question) {
+    finishNotesTask("ask");
     setMeta(el.qaMeta, t("status.question_required"), true);
     return;
   }
+  const mode = currentAskMode();
+  if (mode === "browser") {
+    const startedAtBrowser = Date.now();
+    let askMetaPrefix = t("status.asking_transcript");
+    let askTick = 0;
+    const renderAskMeta = () => {
+      const elapsed = Math.max(1, Math.round((Date.now() - startedAtBrowser) / 1000));
+      const fun = funStatusLine("analyze", askTick);
+      askTick += 1;
+      setMeta(el.qaMeta, `${askMetaPrefix} ${elapsed}s\n${fun}`);
+    };
+    const askTimer = window.setInterval(renderAskMeta, 1200);
+    setSectionLoading(el.askSection, el.qaMeta, true);
+    setButtonLoading(el.askBtn, true, `${t("btn.ask")}...`);
+    el.askBtn.disabled = true;
+    renderAskMeta();
+    el.qaOutput.textContent = "";
+    el.qaOutput.hidden = true;
+    try {
+      const transcript = await ensureSelectedTranscriptText();
+      if (!transcript) throw new Error("Transcript is required for browser ask mode.");
+      const context = buildBrowserQaContext(transcript, question, 15000);
+      const title = String(el.videoTitle?.textContent || state.selectedVideoId || "Video").trim();
+
+      await ensureBrowserLlm((msg) => {
+        askMetaPrefix = String(msg || "").trim() || t("status.asking_transcript");
+        renderAskMeta();
+      });
+      askMetaPrefix = t("status.asking_transcript");
+      renderAskMeta();
+      let finalAnswer = String(await runBrowserChat(
+        "Answer from transcript context only. If evidence exists, give a direct answer and cite up to 3 short timestamped quotes at the end under 'Evidence'. Only say insufficient evidence when the context truly lacks support.",
+        `Title: ${title}\nQuestion: ${question}\n\nTranscript context:\n${context}`,
+        null
+      ) || "").trim();
+
+      if (answerLooksLikeNoEvidence(finalAnswer)) {
+        const evidenceContext = buildBrowserQaEvidenceContext(transcript, question, 10000);
+        if (evidenceContext) {
+          finalAnswer = String(await runBrowserChat(
+            "You are performing focused evidence extraction from transcript lines. Return a direct answer first, then 'Evidence:' with 2-4 short timestamped snippets from the transcript.",
+            `Question: ${question}\n\nTranscript evidence candidates:\n${evidenceContext}`,
+            null
+          ) || "").trim() || finalAnswer;
+        }
+      }
+
+      if (!finalAnswer) throw new Error("Browser model returned an empty answer.");
+      el.qaOutput.textContent = finalAnswer;
+      el.qaOutput.hidden = false;
+      const elapsed = Math.max(1, Math.round((Date.now() - startedAtBrowser) / 1000));
+      setMeta(el.qaMeta, `Answered in ${elapsed}s | mode=browser | llm=${browserLlmDetail()}.`);
+    } catch (err) {
+      setMeta(el.qaMeta, String(err.message || err), true);
+      el.qaOutput.hidden = true;
+    } finally {
+      window.clearInterval(askTimer);
+      el.askBtn.disabled = false;
+      setButtonLoading(el.askBtn, false);
+      setSectionLoading(el.askSection, el.qaMeta, false);
+      finishNotesTask("ask");
+    }
+    return;
+  }
+  const startedAt = Date.now();
+  let askTimer = null;
+  let handoffProgress = null;
   setSectionLoading(el.askSection, el.qaMeta, true);
   setButtonLoading(el.askBtn, true, `${t("btn.ask")}...`);
   el.askBtn.disabled = true;
-  setMeta(el.qaMeta, t("status.asking_transcript"));
+  setMeta(el.qaMeta, `${t("status.asking_transcript")}\n${rotatingFunStatus("analyze", startedAt, 0, 1000)}`);
+  askTimer = window.setInterval(() => {
+    const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    const fun = rotatingFunStatus("analyze", startedAt, 1, 1000);
+    const funLine = fun ? `\n${fun}` : "";
+    setMeta(el.qaMeta, `${t("status.asking_transcript")} ${elapsed}s${funLine}`);
+  }, 1200);
   el.qaOutput.textContent = "";
   el.qaOutput.hidden = true;
   try {
     const data = await apiPost("/api/ask", { video_id: state.selectedVideoId, question });
+    if (String(data.status || "").trim().toLowerCase() === "already_running" || Boolean(data.in_progress)) {
+      handoffProgress = {
+        busy_task: "ask",
+        ask: {
+          ...(data.item && typeof data.item === "object" ? data.item : {}),
+          status: "running",
+          in_progress: true,
+        },
+      };
+      setMeta(el.qaMeta, String((data.item || {}).message || t("status.ask_already_running")));
+      return;
+    }
     const answer = String(data.answer || "");
     el.qaOutput.textContent = answer;
     el.qaOutput.hidden = !answer.trim();
     const llm = llmDetailText(data.llm_backend_detail, data.llm_backend, answer);
-    setMeta(el.qaMeta, `Answered in ${data.elapsed_sec}s | llm=${llm}.`);
+    const mode = Boolean(data.cached) ? "cache" : "fresh";
+    setMeta(el.qaMeta, `Answered in ${data.elapsed_sec}s | ${mode} | llm=${llm}.`);
   } catch (err) {
     setMeta(el.qaMeta, String(err.message || err), true);
     el.qaOutput.hidden = true;
   } finally {
+    if (askTimer) window.clearInterval(askTimer);
     el.askBtn.disabled = false;
     setButtonLoading(el.askBtn, false);
     setSectionLoading(el.askSection, el.qaMeta, false);
+    finishNotesTask("ask");
+    if (handoffProgress) applyServerNotesProgress(state.selectedVideoId, handoffProgress);
   }
 }
 
@@ -1810,7 +3095,7 @@ async function runIngest(ev) {
   el.ingestBtn.disabled = true;
   setMeta(el.ingestMeta, t("status.saving_transcript"));
   try {
-    const data = await apiPost("/api/save_transcript", { url, force: Boolean(el.forceTranscript.checked) });
+    const data = await apiPost("/api/save_transcript", { url, force: false });
     setMeta(
       el.ingestMeta,
       `Ready in ${data.elapsed_sec}s | ${data.video_id} | ${data.cached ? "cached" : data.source || "new"}`
@@ -1843,13 +3128,10 @@ async function runDirectPrepare(ev) {
     } catch (err) {
       firstErr = firstErr || err;
     }
-    const videoStartedSave = Boolean(videoOk?.save_started) && !String(videoOk?.download_url || "").trim();
-    if (!videoStartedSave) {
-      try {
-        audioOk = await buildAndRememberDirectLink(url, "audio");
-      } catch (err) {
-        firstErr = firstErr || err;
-      }
+    try {
+      audioOk = await buildAndRememberDirectLink(url, "audio");
+    } catch (err) {
+      firstErr = firstErr || err;
     }
     if (!videoOk && !audioOk) {
       throw firstErr || new Error("Could not prepare video/audio links.");
@@ -1874,9 +3156,16 @@ async function runDirectPrepare(ev) {
     renderDirectResultCard(state.directResultContext);
     const bestLink = String(videoOk?.download_url || audioOk?.download_url || "").trim();
     const copied = bestLink ? await copyText(bestLink) : false;
-    const saveStarted = Boolean(videoOk?.save_started || audioOk?.save_started);
-    if (!bestLink && saveStarted) {
-      setMeta(el.directMeta, "Direct links are blocked by YouTube for this request. Server save started instead.");
+    const manualSaveNeeded = [videoOk, audioOk].some((x) => {
+      const row = x && typeof x === "object" ? x : {};
+      const reason = String(row.fallback_reason || "").trim().toLowerCase();
+      const saveStatus = String(row.save_status || "").trim().toLowerCase();
+      return reason === "youtube_antibot_direct_blocked" || saveStatus === "manual_required";
+    });
+    if (!bestLink && manualSaveNeeded) {
+      setMeta(el.directMeta, "Direct links blocked by YouTube. Click 'Download To Server' to start save manually.");
+    } else if (!bestLink) {
+      setMeta(el.directMeta, "No direct links available right now. Try again later or use 'Download To Server'.", true);
     } else {
       setMeta(
         el.directMeta,
@@ -1945,22 +3234,24 @@ function renderResearches() {
   const items = state.researches.filter((r) => researchHasResult(r)).filter((r) => {
     if (!q) return true;
     const tags = (r.topics || []).map((t) => String(t.tag || "").toLowerCase()).join(" ");
-    return `${r.goal_text || ""} ${r.run_id || ""} ${tags}`.toLowerCase().includes(q);
+    return `${researchDisplayTitle(r)} ${r.goal_text || ""} ${r.run_id || ""} ${tags}`.toLowerCase().includes(q);
   });
 
   el.researchList.innerHTML = items.length
     ? items
         .map((r) => {
           const tags = (r.topics || []).map((t) => t.tag).filter(Boolean).slice(0, 3).join(", ");
-          return makeListItem(
-            r.run_id,
-            state.selectedResearchId === r.run_id,
-            r.goal_text || r.run_id,
-            `${r.run_kind || "research"} | ${r.status || ""} | ${tags || "no tags"}`
-          );
+          const thumbs = researchPreviewThumbs(r);
+          return `
+            <button class="item research-list-item${state.selectedResearchId === r.run_id ? " active" : ""}" data-id="${escapeHtml(r.run_id)}">
+              <div class="line-1">${escapeHtml(researchDisplayTitle(r))}</div>
+              <div class="line-2">${escapeHtml(`${r.run_kind || "research"} | ${r.status || ""} | ${tags || "no tags"}`)}</div>
+              ${thumbs ? `<div class="research-list-thumbs">${thumbs}</div>` : ""}
+            </button>
+          `;
         })
         .join("")
-    : `<p class="meta">${escapeHtml(t("status.no_public_researches"))}</p>`;
+    : `<p class="meta">${escapeHtml(t("status.no_completed_public_researches"))}</p>`;
 
   el.researchList.querySelectorAll(".item").forEach((btn) => btn.addEventListener("click", () => loadResearchDetail(btn.dataset.id)));
 }
@@ -1969,10 +3260,11 @@ async function loadResearches(keepSelected = true) {
   if (!el.researchList) return;
   const data = await apiGet("/api/researches");
   state.researches = data.items || [];
-  const withResults = state.researches.filter((r) => researchHasResult(r));
-  if (!keepSelected || !withResults.some((r) => r.run_id === state.selectedResearchId)) {
-    state.selectedResearchId = (withResults[0] || {}).run_id || "";
+  const withSummary = state.researches.filter((r) => researchHasResult(r));
+  if (!keepSelected || !withSummary.some((r) => r.run_id === state.selectedResearchId)) {
+    state.selectedResearchId = (withSummary[0] || {}).run_id || "";
   }
+  writeUiPrefs();
   renderResearches();
   if (state.selectedResearchId) await loadResearchDetail(state.selectedResearchId);
   else {
@@ -1986,14 +3278,25 @@ async function loadResearchDetail(runId) {
   if (!runId || !el.researchTitle || !el.researchMeta || !el.researchOutput) return;
   const data = await apiGet(`/api/research?run_id=${encodeURIComponent(runId)}`);
   const item = data.item || {};
+  if (!researchHasResult(item)) {
+    if (state.selectedResearchId === runId) state.selectedResearchId = "";
+    writeUiPrefs();
+    renderResearches();
+    el.researchTitle.textContent = t("research.detail");
+    setMeta(el.researchMeta, t("status.no_completed_public_researches"));
+    el.researchOutput.textContent = "";
+    return;
+  }
   state.selectedResearchId = item.run_id || runId;
+  writeUiPrefs();
   const topics = (item.topics || []).map((t) => t.tag).filter(Boolean).join(", ");
-  el.researchTitle.textContent = item.goal_text || "Research Detail";
+  const videoCount = Array.isArray(item.videos) ? item.videos.length : 0;
+  el.researchTitle.textContent = researchDisplayTitle(item);
   setMeta(
     el.researchMeta,
-    `Kind: ${item.run_kind || "research"} | status: ${item.status || ""} | topics: ${topics || "none"}`
+    `Kind: ${item.run_kind || "research"} | status: ${item.status || ""} | videos: ${videoCount} | topics: ${topics || "none"}`
   );
-  el.researchOutput.textContent = formatResearchDetail(item);
+  el.researchOutput.innerHTML = formatResearchDetailHtml(item);
   renderResearches();
 }
 
@@ -2007,6 +3310,32 @@ function upsertJob(job) {
   if (!state.selectedJobId) state.selectedJobId = job.job_id;
 }
 
+function findSavedVideoForBrewCard(video) {
+  const row = video && typeof video === "object" ? video : {};
+  const vid = String(row.video_id || "").trim();
+  const src = String(row.url || "").trim();
+  if (!Array.isArray(state.videos) || !state.videos.length) return null;
+  return (
+    state.videos.find((x) => String(x.video_id || "").trim() === vid)
+    || state.videos.find((x) => {
+      const xSrc = String(x.source_url || x.youtube_url || "").trim();
+      return Boolean(src && xSrc && xSrc === src);
+    })
+    || null
+  );
+}
+
+function brewCardSourceUrl(video, savedRow) {
+  const row = video && typeof video === "object" ? video : {};
+  const saved = savedRow && typeof savedRow === "object" ? savedRow : {};
+  const fromVideo = String(row.url || "").trim();
+  if (fromVideo) return fromVideo;
+  const fromSaved = String(saved.source_url || saved.youtube_url || "").trim();
+  if (fromSaved) return fromSaved;
+  const vid = String(row.video_id || saved.video_id || "").trim();
+  return vid ? `https://www.youtube.com/watch?v=${vid}` : "";
+}
+
 function renderVideoCards(node, videos, emptyText = t("status.no_items")) {
   if (!node) return;
   const list = Array.isArray(videos) ? videos : [];
@@ -2016,21 +3345,60 @@ function renderVideoCards(node, videos, emptyText = t("status.no_items")) {
   }
   node.innerHTML = list
     .map((v) => {
+      const savedRow = findSavedVideoForBrewCard(v) || {};
       const thumb = v.thumbnail_url || "";
-      const href = v.url || "#";
+      const sourceUrl = brewCardSourceUrl(v, savedRow);
+      const href = sourceUrl || "#";
+      const savedUrlRaw = String(savedRow.public_url || "").trim();
+      const savedUrl = safeHref(savedUrlRaw);
+      const canSave = Boolean(sourceUrl && !savedUrlRaw);
+      const sourceHref = safeHref(sourceUrl || "#");
+      const serverAction = savedUrlRaw
+        ? `<a class="btn ghost" href="${escapeHtml(savedUrl)}" target="_blank" rel="noreferrer" download>${escapeHtml(t("btn.open_saved_file"))}</a>`
+        : (canSave
+          ? `<button class="btn ghost brew-save-btn" type="button" data-url="${encodeURIComponent(sourceUrl)}">${escapeHtml(t("btn.download_to_server"))}</button>`
+          : "");
+      const hasActionRow = Boolean(serverAction);
+      const thumbBlock = thumb
+        ? (
+          sourceUrl
+            ? `<a class="brew-video-thumb-link" href="${escapeHtml(sourceHref)}" target="_blank" rel="noreferrer"><img src="${escapeHtml(thumb)}" alt="" loading="lazy" /></a>`
+            : `<img src="${escapeHtml(thumb)}" alt="" loading="lazy" />`
+        )
+        : "";
       return `
         <article class="video-card">
-          <img src="${escapeHtml(thumb)}" alt="" loading="lazy" />
+          ${thumbBlock}
           <div class="body">
             <p class="title"><a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${escapeHtml(v.title || v.video_id || "Video")}</a></p>
             <p class="meta-line">${escapeHtml(v.channel || "Unknown")} | duration: ${escapeHtml(formatDuration(v.duration_sec))}</p>
             <p class="meta-line">captions: ${v.has_captions ? "yes" : "no/unknown"}</p>
             <p class="meta-line">${escapeHtml(v.video_id || "")}</p>
+            ${hasActionRow ? `<div class="row direct-action-row">
+              ${serverAction}
+            </div>` : ""}
+            ${sourceUrl ? directSaveProgressHtml(sourceUrl) : ""}
           </div>
         </article>
       `;
     })
     .join("");
+  node.querySelectorAll(".brew-save-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const rawUrl = decodeURIComponent(String(btn.dataset.url || ""));
+      if (!rawUrl) return;
+      if (!shouldStartDirectServerSave(rawUrl)) {
+        setMeta(el.juiceMeta, "Server save already in progress or already available.");
+        return;
+      }
+      btn.disabled = true;
+      try {
+        await runSaveOnServer(rawUrl);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
 function renderJobs() {
@@ -2092,11 +3460,14 @@ function renderSelectedJob() {
     else if (currentStep === 4) infoLine = `${t("status.reviewing_videos", { reviewed, total: targetVideos })}${currentVideoTitle ? ` · ${currentVideoTitle}` : ""}`;
     else infoLine = t("status.comparing_insights", { reviewed });
   }
+  const funSeed = Math.floor(Date.now() / 3500) + (currentStep * 11) + reviewed;
+  const funLine = funStatusLine("brew", funSeed);
 
   el.brewProgressBar.style.width = `${percent}%`;
   el.brewMeta.innerHTML = `
     <p class="brew-submeta">Step ${step}/${totalSteps}: ${escapeHtml(stage)} · ${percent}%</p>
     ${infoLine ? `<p class="brew-detail">${escapeHtml(infoLine)}</p>` : ""}
+    ${funLine ? `<p class="brew-detail">${escapeHtml(funLine)}</p>` : ""}
   `;
 
   const pills = [
@@ -2154,6 +3525,7 @@ function renderSelectedJob() {
 
 function selectJob(jobId) {
   state.selectedJobId = jobId;
+  writeUiPrefs();
   renderJobs();
   renderSelectedJob();
 }
@@ -2163,6 +3535,7 @@ async function loadJobs(activeOnly = false) {
   const items = data.items || [];
   items.forEach((j) => upsertJob(j));
   if (!state.selectedJobId && items.length) state.selectedJobId = items[0].job_id;
+  writeUiPrefs();
   renderJobs();
   renderSelectedJob();
 }
@@ -2181,10 +3554,13 @@ function connectWebSocket() {
   if (state.ws && state.ws.readyState === WebSocket.OPEN) return;
 
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  const isHttps = window.location.protocol === "https:";
   const host = window.location.hostname || "127.0.0.1";
   const port = state.runtime.ws_port;
   const path = state.runtime.ws_path || "/ws";
-  const url = `${proto}://${host}:${port}${path}`;
+  const url = isHttps
+    ? `${proto}://${window.location.host}${path}`
+    : `${proto}://${host}:${port}${path}`;
 
   try {
     setWsState(t("status.connecting_live_updates"), false);
@@ -2266,12 +3642,13 @@ async function runJuice(ev) {
   };
 
   el.juiceRunBtn.disabled = true;
-  setMeta(el.juiceMeta, t("status.starting_brewing"));
+  setMeta(el.juiceMeta, `${t("status.starting_brewing")}\n${funStatusLine("brew", 0)}`);
   try {
     const data = await apiPost("/api/knowledge_juice/start", payload);
     const item = data.item || {};
     upsertJob(item);
     state.selectedJobId = item.job_id || state.selectedJobId;
+    writeUiPrefs();
     renderJobs();
     renderSelectedJob();
     setMeta(el.juiceMeta, t("status.brewing_started"));
@@ -2304,8 +3681,10 @@ function renderStackColumn(node, items) {
 
 function renderStackInfo() {
   const info = state.stackInfo && typeof state.stackInfo === "object" ? state.stackInfo : {};
-  renderStackColumn(el.stackWebList, info.web || []);
-  renderStackColumn(el.stackTgList, info.tg_chatbot || []);
+  const uiItems = Array.isArray(info.ui_part) ? info.ui_part : (info.web || []);
+  const beItems = Array.isArray(info.be_side) ? info.be_side : (info.tg_chatbot || []);
+  renderStackColumn(el.stackWebList, uiItems);
+  renderStackColumn(el.stackTgList, beItems);
   const generated = String(info.generated_at || "").trim();
   setMeta(el.stackMeta, generated ? `Updated: ${formatTime(generated)}` : "");
 }
@@ -2544,6 +3923,8 @@ function wireEvents() {
   [el.juiceMaxVideos, el.juiceMaxQueries, el.juicePerQuery, el.juiceMinDuration, el.juiceMaxDuration, el.juiceFast, el.juicePrivate]
     .filter(Boolean)
     .forEach((node) => node.addEventListener("change", persistJuicePrefs));
+  el.askModeSelect?.addEventListener("change", persistExecModePrefs);
+  el.analyzeModeSelect?.addEventListener("change", persistExecModePrefs);
   el.ingestForm?.addEventListener("submit", runIngest);
   el.askForm?.addEventListener("submit", runAsk);
   el.analyzeBtn?.addEventListener("click", runAnalyze);
@@ -2558,12 +3939,18 @@ async function init() {
   const prefs = readUiPrefs();
   _uiLang = prefs.lang;
   _uiTheme = prefs.theme;
+  state.page = _normalizePage(prefs.page || state.page);
+  state.selectedResearchId = String(prefs.selected_research_id || "").trim();
+  state.selectedJobId = String(prefs.selected_job_id || "").trim();
+  state.selectedVideoId = String(prefs.selected_video_id || "").trim();
   applyTheme(_uiTheme, false);
   applyLanguage(_uiLang, false);
   applyJuicePrefs();
+  applyExecModePrefs();
   wireEvents();
+  syncNotesActionButtons();
   renderRecentDirectSearches();
-  switchPage(state.page || "direct");
+  switchPage(state.page || "direct", false);
   try {
     await initRuntime();
     connectWebSocket();

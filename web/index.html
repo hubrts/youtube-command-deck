@@ -18,7 +18,6 @@
           </div>
         </div>
         <div class="topbar-controls">
-          <span class="topbar-badge">Refactored UI</span>
           <span class="topbar-hint">YouTube Ops Hub</span>
           <label class="topbar-lang">
             <span data-i18n="label.language">Language</span>
@@ -44,7 +43,7 @@
             <button class="tab" data-page="archive" type="button" data-i18n="tab.archive">Save Live</button>
             <button class="tab" data-page="transcript" type="button" data-i18n="tab.transcript">Video Notes</button>
             <button class="tab" data-page="juice" type="button" data-i18n="tab.juice">Knowledge Brew</button>
-            <button class="tab" data-page="advanced" type="button">Advanced</button>
+            <button class="tab" data-page="advanced" type="button" data-i18n="tab.info">Info</button>
           </nav>
 
           <section class="youtube-notes">
@@ -80,14 +79,6 @@
                 <p id="directRetentionMeta" class="meta"></p>
                 <div id="directPreview" class="direct-preview"></div>
                 <div id="directOutput" class="output"></div>
-              </article>
-
-              <article class="card">
-                <div class="row between">
-                  <h2 data-i18n="direct.saved_videos">Saved Videos</h2>
-                  <input id="vaultSearchInput" type="search" placeholder="Search" data-i18n-placeholder="placeholder.search" />
-                </div>
-                <div id="videoList" class="list dense-list"></div>
               </article>
             </div>
 
@@ -140,7 +131,6 @@
                 <form id="ingestForm" class="stack">
                   <input id="urlInput" type="url" placeholder="https://www.youtube.com/watch?v=..." data-i18n-placeholder="placeholder.youtube_url" />
                   <div class="row between intake-actions">
-                    <label class="check"><input id="forceTranscript" type="checkbox" /> <span data-i18n="notes.rebuild_if_cached">rebuild if cached</span></label>
                     <button id="ingestBtn" class="btn primary" type="submit" data-i18n="btn.save_transcript">Save Transcript</button>
                   </div>
                 </form>
@@ -170,7 +160,16 @@
                     <h4 data-i18n="notes.ask_transcript">Ask Transcript</h4>
                     <form id="askForm" class="stack notes-form">
                       <textarea id="questionInput" rows="3" placeholder="Ask about selected video transcript..." data-i18n-placeholder="placeholder.ask_transcript"></textarea>
-                      <button id="askBtn" class="btn primary" type="submit" data-i18n="btn.ask">Ask</button>
+                      <div class="row between notes-mode-row">
+                        <label class="field-inline">
+                          <span data-i18n="label.exec_mode">Mode</span>
+                          <select id="askModeSelect">
+                            <option value="browser" data-i18n="mode.browser_fast">Browser (faster)</option>
+                            <option value="server" data-i18n="mode.server_side">Server side (longer)</option>
+                          </select>
+                        </label>
+                        <button id="askBtn" class="btn primary" type="submit" data-i18n="btn.ask">Ask</button>
+                      </div>
                     </form>
                     <p id="qaMeta" class="meta"></p>
                     <pre id="qaOutput" class="output" hidden></pre>
@@ -180,7 +179,13 @@
                     <h4 data-i18n="notes.analysis">Analysis</h4>
                     <div class="row notes-analyze-row">
                       <button id="analyzeBtn" class="btn primary" type="button" data-i18n="btn.run_analysis">Run Analysis</button>
-                      <label class="check"><input id="forceAnalyze" type="checkbox" /> <span data-i18n="notes.force_fresh">force fresh</span></label>
+                      <label class="field-inline">
+                        <span data-i18n="label.exec_mode">Mode</span>
+                        <select id="analyzeModeSelect">
+                          <option value="browser" data-i18n="mode.browser_fast">Browser (faster)</option>
+                          <option value="server" data-i18n="mode.server_side">Server side (longer)</option>
+                        </select>
+                      </label>
                     </div>
                     <p id="analysisMeta" class="meta"></p>
                     <pre id="analysisOutput" class="output"></pre>
@@ -188,7 +193,7 @@
                 </div>
 
                 <section class="notes-transcript-panel">
-                  <h4 data-i18n="notes.transcript_preview">Transcript Preview</h4>
+                  <h4 data-i18n="notes.transcript_preview">Full Transcript</h4>
                   <pre id="transcriptOutput" class="output tall"></pre>
                 </section>
               </article>
@@ -199,15 +204,23 @@
             <div class="page-head">
               <h1 data-i18n="juice.head.title">Knowledge Brew</h1>
               <p data-i18n="juice.head.desc">Run caption-aware topic research and follow live progress by step.</p>
+              <div class="juice-how">
+                <p class="juice-how-title" data-i18n="juice.how_title">How this works</p>
+                <p data-i18n="juice.how_line_1">Brew compares multiple owner videos on one topic, then extracts common patterns and differences.</p>
+                <p data-i18n="juice.how_line_2">Use it to compress many hours of watch time into actionable lessons and practical next steps.</p>
+                <p data-i18n="juice.how_line_3">Great for success-story learning, business model understanding, or comparing creators in the same niche.</p>
+              </div>
             </div>
 
             <div class="grid two">
               <article class="card brew-controls-card">
-                <h2 data-i18n="juice.brew_title">Brew Knowledge Juice</h2>
+                <div class="row between brew-title-row">
+                  <h2 data-i18n="juice.brew_title">Brew Knowledge Juice</h2>
+                  <button id="juiceFiltersToggle" class="btn ghost" type="button" data-i18n="btn.filters">Filters</button>
+                </div>
                 <form id="juiceForm" class="stack juice-compact-form">
                   <div class="juice-inline-row">
                     <input id="juiceTopicInput" type="text" placeholder="bakery, mechanic, etc." data-i18n-placeholder="placeholder.topic" />
-                    <button id="juiceFiltersToggle" class="btn ghost" type="button" data-i18n="btn.filters">Filters</button>
                     <button id="juiceRunBtn" class="btn primary" type="submit" data-i18n="btn.start_brewing">Start Brewing</button>
                   </div>
 
@@ -271,16 +284,16 @@
 
               <article class="card">
                 <h2 id="researchTitle" data-i18n="research.detail">Research Detail</h2>
+                <div id="researchOutput" class="output tall"></div>
                 <p id="researchMeta" class="meta"></p>
-                <pre id="researchOutput" class="output tall"></pre>
               </article>
             </div>
           </section>
 
           <section id="page-advanced" class="page">
             <div class="page-head">
-              <h1>Advanced Operations</h1>
-              <p>Run component test jobs, watch progress, and inspect stack details for web and TG chatbot.</p>
+              <h1>Info</h1>
+              <p>Inspect stack details split by UI part and BE side, and run component test jobs.</p>
             </div>
 
             <div class="grid two">
@@ -293,22 +306,22 @@
 
                 <div class="stack-logo-row">
                   <div class="stack-logo-box">
-                    <img src="/assets/logo-ui.svg" alt="Web UI logo" />
-                    <p>Web UI</p>
+                    <img src="/assets/logo-ui.svg" alt="UI part logo" />
+                    <p>UI part</p>
                   </div>
                   <div class="stack-logo-box">
-                    <img src="/assets/logo-chatbot.svg" alt="TG chatbot logo" />
-                    <p>TG Chatbot</p>
+                    <img src="/assets/logo-chatbot.svg" alt="BE side logo" />
+                    <p>BE side</p>
                   </div>
                 </div>
 
                 <div class="grid two compact">
                   <section class="stack-list-wrap">
-                    <h3>Web</h3>
+                    <h3>UI part</h3>
                     <div id="stackWebList" class="list dense-list"></div>
                   </section>
                   <section class="stack-list-wrap">
-                    <h3>TG Chatbot</h3>
+                    <h3>BE side</h3>
                     <div id="stackTgList" class="list dense-list"></div>
                   </section>
                 </div>
@@ -320,8 +333,8 @@
                   <div class="row component-controls">
                     <select id="componentTypeSelect" class="topbar-select">
                       <option value="all">All Components</option>
-                      <option value="web">Web UI</option>
-                      <option value="tg">TG Chatbot</option>
+                      <option value="web">UI part</option>
+                      <option value="tg">BE side</option>
                     </select>
                     <button id="componentRunBtn" class="btn primary" type="button">Run Tests</button>
                   </div>

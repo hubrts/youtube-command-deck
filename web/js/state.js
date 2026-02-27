@@ -14,9 +14,12 @@ export const state = {
   jobsPollTimer: null,
   livePollTimer: null,
   directSaveProgress: new Map(),
+  directSaveWatchers: new Set(),
   directResultContext: null,
   stackInfo: null,
   componentJobs: new Map(),
   selectedComponentJobId: "",
   componentPollTimer: null,
+  notesBusyTask: "",
+  notesRemoteTask: "",
 };

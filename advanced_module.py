@@ -132,19 +132,35 @@ def summarize_metrics(
 
 def technology_stack() -> dict:
     now_iso = datetime.now(timezone.utc).isoformat()
+    ui_part = [
+        {"name": "Python 3", "details": "web_app.py HTTP API + orchestration"},
+        {"name": "ThreadingHTTPServer", "details": "built-in HTTP server for SPA and API"},
+        {"name": "JavaScript ES Modules", "details": "single-page UI in web/js/*.js"},
+        {"name": "HTML5 + CSS3", "details": "responsive multi-module UI"},
+        {"name": "WebSocket (optional)", "details": "live brewing updates via websockets package"},
+        {"name": "OpenAPI + Swagger", "details": "schema served from /api/openapi.json and /swagger"},
+        {"name": "Component Test Runner", "details": "unittest discovery + live progress via /api/component_tests/*"},
+    ]
+    be_side = [
+        {"name": "python-telegram-bot", "details": "command routing and chat interactions"},
+        {"name": "asyncio", "details": "non-blocking bot flows and background tasks"},
+        {"name": "yt-dlp pipeline", "details": "direct links, downloads, transcript/audio intake"},
+        {"name": "Transcript Maker (YouTube captions)", "details": "yt-dlp caption extraction, VTT parsing, English-preferred selection"},
+        {"name": "Transcript Maker (audio STT)", "details": "faster-whisper local transcription fallback on CPU"},
+        {"name": "Transcript Analyzer", "details": "video_notes.py runs analysis, Q&A, and citation checks on saved transcripts"},
+        {"name": "Local LLM (Ollama)", "details": "VIDEO_LOCAL_LLM_URL + VIDEO_LOCAL_LLM_MODEL for analysis/Q&A"},
+        {"name": "Remote LLM (OpenAI)", "details": "Chat Completions + embeddings (gpt-4.1-mini, text-embedding-3-small defaults)"},
+        {"name": "Remote LLM (Anthropic Claude)", "details": "Messages API with fallback/rate-limit controls"},
+        {"name": "Knowledge Juice Analyzer", "details": "market_research.py compares videos, extracts facts, and builds topic reports"},
+        {"name": "Embeddings + Semantic Retrieval", "details": "OpenAI/Ollama embeddings + transcript chunk ranking"},
+        {"name": "PostgreSQL + pgvector (optional)", "details": "state_store persists index/research/QA and vector search tables"},
+        {"name": "Shared local state", "details": "index/transcript/research files reused by web and TG"},
+    ]
     return {
         "generated_at": now_iso,
-        "web": [
-            {"name": "Python 3", "details": "web_app.py HTTP API + orchestration"},
-            {"name": "ThreadingHTTPServer", "details": "built-in HTTP server for SPA and API"},
-            {"name": "JavaScript ES Modules", "details": "single-page UI in web/js/*.js"},
-            {"name": "HTML5 + CSS3", "details": "responsive multi-module UI"},
-            {"name": "WebSocket (optional)", "details": "live brewing updates via websockets package"},
-        ],
-        "tg_chatbot": [
-            {"name": "python-telegram-bot", "details": "command routing and chat interactions"},
-            {"name": "asyncio", "details": "non-blocking bot flows and background tasks"},
-            {"name": "yt-dlp pipeline", "details": "direct links, downloads, transcript/audio intake"},
-            {"name": "Shared local state", "details": "index/transcript/research files reused by web and TG"},
-        ],
+        "ui_part": ui_part,
+        "be_side": be_side,
+        # Backward compatibility for existing clients/tests.
+        "web": list(ui_part),
+        "tg_chatbot": list(be_side),
     }

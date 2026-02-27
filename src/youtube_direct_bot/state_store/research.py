@@ -351,11 +351,61 @@ def load_public_research_runs(limit: int = 50) -> List[dict]:
             )
             topic_rows = cur.fetchall()
 
+            cur.execute(
+                """
+                SELECT run_id, video_id, rank, title, meta_json
+                FROM (
+                    SELECT
+                        rv.run_id,
+                        rv.video_id,
+                        rv.rank,
+                        rv.title,
+                        rv.meta_json,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY rv.run_id
+                            ORDER BY rv.rank ASC, rv.popularity_score DESC
+                        ) AS rn
+                    FROM research_videos rv
+                    WHERE rv.run_id IN (
+                        SELECT run_id
+                        FROM research_runs
+                        WHERE is_public = TRUE
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    )
+                ) ranked
+                WHERE rn <= 4
+                ORDER BY run_id ASC, rn ASC
+                """,
+                (lim,),
+            )
+            preview_video_rows = cur.fetchall()
+
     topics_by_run: Dict[str, List[dict]] = {}
     for run_id, topic_tag, weight in topic_rows:
         rid = str(run_id or "")
         topics_by_run.setdefault(rid, []).append(
             {"tag": str(topic_tag or ""), "weight": float(weight or 0.0)}
+        )
+
+    preview_videos_by_run: Dict[str, List[dict]] = {}
+    for run_id, video_id, rank, title, meta_json in preview_video_rows:
+        rid = str(run_id or "")
+        meta = meta_json
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        preview_videos_by_run.setdefault(rid, []).append(
+            {
+                "video_id": str(video_id or ""),
+                "rank": int(rank or 0),
+                "title": str(title or ""),
+                "thumbnail_url": str(meta.get("thumbnail_url") or ""),
+            }
         )
 
     out: List[dict] = []
@@ -391,6 +441,7 @@ def load_public_research_runs(limit: int = 50) -> List[dict]:
                 "summary": summary,
                 "intent": intent,
                 "topics": topics_by_run.get(rid, [])[:10],
+                "preview_videos": preview_videos_by_run.get(rid, [])[:4],
                 "created_at": created_iso,
                 "updated_at": updated_iso,
             }

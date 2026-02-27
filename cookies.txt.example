@@ -1,0 +1,3 @@
+# Netscape HTTP Cookie File
+# Export this file from your own browser session; never commit real cookies.
+# Point COOKIES_FILE to the real path in your environment (.env or systemd env).

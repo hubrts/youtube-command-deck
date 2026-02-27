@@ -1,0 +1,39 @@
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local runtime data and logs
+data/
+logs/
+*.log
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/
+
+# Local app secrets and environment files
+.env
+.env.*
+!.env.example
+*.env.local
+cookies.txt
+*.cookies.txt
+secrets/
+.secrets/
+
+# Local assistant/editor config
+.claude/settings.local.json
+
+# Generated deployment/runtime outputs
+*.pid
+*.tmp
